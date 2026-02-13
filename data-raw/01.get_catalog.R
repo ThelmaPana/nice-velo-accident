@@ -58,9 +58,28 @@ catalog_accidents <- bind_rows(all_data)
 ## Clean and save ----
 #--------------------------------------------------------------------------#
 # Keep only relevant columns
-resources <- catalog_accidents %>%
+catalog <- catalog_accidents %>%
   select(resource_id = id, title, url) %>%
   distinct(resource_id, .keep_all = TRUE)
 
+# Keep only relevant files, i.e. files of type
+# - caracteristiques
+# - lieux
+# - vehicules
+# - usagers
+catalog <- catalog %>%
+  mutate(
+    annee = str_extract(title, "\\d{4}"),
+    type = case_when(
+      str_detect(tolower(title), "caract|carc") ~ "caracteristiques",
+      str_detect(tolower(title), "lieux") ~ "lieux",
+      str_detect(tolower(title), "vehic") ~ "vehicules",
+      str_detect(tolower(title), "usagers") ~ "usagers",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(type), !is.na(annee))
+
 # Save
-write_csv(resources, here("data-raw", "01.catalog_accidents_clean.csv"))
+write_csv(catalog, here("data-raw", "01.catalog.csv"))
+
