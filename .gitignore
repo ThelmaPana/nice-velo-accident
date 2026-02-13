@@ -47,3 +47,22 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# ======
+
+# renv
+renv/library/
+renv/staging/
+renv/local/
+
+# Quarto
+analysis/_site/
+analysis/.quarto/
+analysis/*_cache/
+analysis/*_files/
+
+# App
+app/rsconnect/
+app/renv/
+
+
