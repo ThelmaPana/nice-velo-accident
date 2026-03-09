@@ -1,0 +1,385 @@
+---
+title: "Accidents à vélo à Nice — Exploration des données BAAC"
+author: "Thelma Panaïotis"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    embed-resources: true
+lang: fr
+---
+
+```{r setup}
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(here)
+```
+
+## Contexte
+
+Les données proviennent de la **Base de données des Accidents Corporels de la Circulation (BAAC)**, publiée annuellement par le Ministère de l'Intérieur sur [data.gouv.fr](https://www.data.gouv.fr/fr/datasets/bases-de-donnees-annuelles-des-accidents-corporels-de-la-circulation-routiere-annees-de-2005-a-2024/). Elles couvrent l'ensemble des accidents corporels survenus sur les voies ouvertes à la circulation publique en France.
+
+Les données sont organisées en **4 tables** jointes par `Num_Acc` :
+
+| Table | Contenu |
+|---|---|
+| `caracteristiques` | Date, heure, localisation, conditions générales |
+| `lieux` | Caractéristiques de la voie (type, profil, surface...) |
+| `vehicules` | Véhicules impliqués et leur catégorie |
+| `usagers` | Personnes impliquées et leur gravité |
+
+Deux formats coexistent dans les données BAAC : avant 2019, les colonnes `dep`, `com`, `an` et `hrmn` avaient des encodages différents (voir `data-raw/02.read_data.R`). Le script de collecte normalise ces différences.
+
+## Chargement des données
+
+```{r load}
+caracteristiques <- readRDS(here("data", "caracteristiques.rds"))
+lieux            <- readRDS(here("data", "lieux.rds"))
+vehicules        <- readRDS(here("data", "vehicules.rds"))
+usagers          <- readRDS(here("data", "usagers.rds"))
+```
+
+### Aperçu des tables
+
+```{r apercu}
+cat("caracteristiques :", nrow(caracteristiques), "lignes,", ncol(caracteristiques), "colonnes\n")
+cat("lieux            :", nrow(lieux),            "lignes,", ncol(lieux),            "colonnes\n")
+cat("vehicules        :", nrow(vehicules),         "lignes,", ncol(vehicules),         "colonnes\n")
+cat("usagers          :", nrow(usagers),           "lignes,", ncol(usagers),           "colonnes\n")
+```
+
+```{r apercu-tables}
+glimpse(caracteristiques)
+```
+
+### Harmonisation des types
+
+Les tables secondaires (lieux, véhicules, usagers) sont lues en `character` depuis les CSVs bruts pour les années sans API Tabular. On convertit les colonnes clés.
+
+```{r typage}
+vehicules <- vehicules %>%
+  mutate(
+    Num_Acc = as.character(Num_Acc),
+    catv    = as.integer(catv)
+  )
+
+usagers <- usagers %>%
+  mutate(
+    Num_Acc  = as.character(Num_Acc),
+    grav     = as.integer(grav),
+    catu     = as.integer(catu),
+    sexe     = as.integer(sexe),
+    an_nais  = as.integer(an_nais)
+  )
+
+lieux <- lieux %>%
+  mutate(Num_Acc = as.character(Num_Acc))
+
+caracteristiques <- caracteristiques %>%
+  mutate(Num_Acc = as.character(Num_Acc))
+```
+
+## Accidents impliquant un vélo
+
+On identifie les accidents où au moins un véhicule est une **bicyclette** (`catv == 1`) ou un **vélo à assistance électrique** (`catv == 80`, présent à partir de 2016 environ).
+
+```{r filtre-velo}
+# Num_Acc des accidents impliquant un vélo
+acc_velo <- vehicules %>%
+  filter(catv %in% c(1, 80)) %>%
+  pull(Num_Acc) %>%
+  unique()
+
+cat("Accidents impliquant un vélo :", length(acc_velo), "\n")
+cat("Sur", n_distinct(caracteristiques$Num_Acc), "accidents corporels au total à Nice\n")
+cat("Soit", round(length(acc_velo) / n_distinct(caracteristiques$Num_Acc) * 100, 1), "%\n")
+```
+
+```{r tables-velo}
+caract_velo   <- caracteristiques %>% filter(Num_Acc %in% acc_velo)
+lieux_velo    <- lieux            %>% filter(Num_Acc %in% acc_velo)
+vehicules_velo <- vehicules       %>% filter(Num_Acc %in% acc_velo)
+usagers_velo  <- usagers          %>% filter(Num_Acc %in% acc_velo)
+```
+
+## Évolution temporelle
+
+### Tous les accidents corporels vs. accidents vélo
+
+```{r evolution-annuelle}
+total_par_an <- caracteristiques %>% count(an, name = "total")
+velo_par_an  <- caract_velo %>% count(an, name = "velo")
+
+evolution <- total_par_an %>%
+  left_join(velo_par_an, by = "an") %>%
+  mutate(
+    velo  = replace_na(velo, 0),
+    pct   = velo / total * 100
+  )
+
+evolution %>%
+  pivot_longer(c(total, velo), names_to = "type", values_to = "n") %>%
+  mutate(type = recode(type, total = "Tous accidents", velo = "Accidents vélo")) %>%
+  ggplot(aes(x = an, y = n, colour = type)) +
+  geom_line(linewidth = 1) +
+  geom_point() +
+  scale_colour_manual(values = c("Tous accidents" = "grey50", "Accidents vélo" = "#e05c1a")) +
+  labs(
+    title  = "Accidents corporels à Nice (2005–2024)",
+    x      = NULL, y = "Nombre d'accidents", colour = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r pct-velo}
+ggplot(evolution, aes(x = an, y = pct)) +
+  geom_col(fill = "#e05c1a", alpha = 0.8) +
+  labs(
+    title = "Part des accidents impliquant un vélo (%)",
+    x = NULL, y = "%"
+  ) +
+  theme_minimal()
+```
+
+### Saisonnalité (accidents vélo)
+
+```{r saisonnalite}
+mois_labels <- c("Jan", "Fév", "Mar", "Avr", "Mai", "Jun",
+                 "Jul", "Aoû", "Sep", "Oct", "Nov", "Déc")
+
+caract_velo %>%
+  mutate(mois = as.integer(mois)) %>%
+  count(mois) %>%
+  ggplot(aes(x = mois, y = n)) +
+  geom_col(fill = "#e05c1a", alpha = 0.8) +
+  scale_x_continuous(breaks = 1:12, labels = mois_labels) +
+  labs(title = "Accidents vélo par mois (2005–2024)", x = NULL, y = "Nombre d'accidents") +
+  theme_minimal()
+```
+
+### Jour de la semaine
+
+```{r jour-semaine}
+#| message: false
+
+jour_labels <- c("Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim")
+
+caract_velo %>%
+  mutate(
+    date     = make_date(as.integer(an), as.integer(mois), as.integer(jour)),
+    jour_sem = wday(date, week_start = 1)  # 1=lundi ... 7=dimanche
+  ) %>%
+  count(jour_sem) %>%
+  ggplot(aes(x = jour_sem, y = n)) +
+  geom_col(fill = "#e05c1a", alpha = 0.8) +
+  scale_x_continuous(breaks = 1:7, labels = jour_labels) +
+  labs(title = "Accidents vélo par jour de la semaine", x = NULL, y = "Nombre d'accidents") +
+  theme_minimal()
+```
+
+### Heure de la journée
+
+Les données d'heure (`hrmn`) sont disponibles pour 2018 et antérieur, et pour 2024. Elles sont manquantes (bug API Tabular) pour 2019–2023.
+
+```{r heure}
+#| message: false
+#| warning: false
+
+caract_velo %>%
+  filter(!is.na(hrmn), str_detect(hrmn, "^\\d{2}:\\d{2}$")) %>%
+  mutate(heure = as.integer(substr(hrmn, 1, 2))) %>%
+  count(heure) %>%
+  ggplot(aes(x = heure, y = n)) +
+  geom_col(fill = "#e05c1a", alpha = 0.8) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  labs(
+    title   = "Accidents vélo par heure (2018 et antérieur + 2024)",
+    caption = "Données hrmn manquantes pour 2019–2023 (bug API Tabular)",
+    x = "Heure", y = "Nombre d'accidents"
+  ) +
+  theme_minimal()
+```
+
+## Gravité des accidents
+
+Les usagers sont classés selon 4 niveaux de gravité (`grav`) :
+
+| Code | Libellé |
+|---|---|
+| 1 | Indemne |
+| 2 | Tué |
+| 3 | Blessé hospitalisé |
+| 4 | Blessé léger |
+
+```{r gravite}
+grav_labels <- c("1" = "Indemne", "2" = "Tué", "3" = "Blessé hospitalisé", "4" = "Blessé léger")
+
+usagers_velo %>%
+  mutate(grav_label = recode(as.character(grav), !!!grav_labels)) %>%
+  count(grav_label) %>%
+  mutate(grav_label = fct_reorder(grav_label, n, .desc = TRUE)) %>%
+  ggplot(aes(x = grav_label, y = n, fill = grav_label)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_manual(values = c(
+    "Indemne"             = "#4caf50",
+    "Blessé léger"        = "#ff9800",
+    "Blessé hospitalisé"  = "#f44336",
+    "Tué"                 = "#212121"
+  )) +
+  labs(title = "Gravité des usagers impliqués dans des accidents vélo", x = NULL, y = "Nombre d'usagers") +
+  theme_minimal()
+```
+
+```{r gravite-annee}
+usagers_velo %>%
+  left_join(caract_velo %>% select(Num_Acc, an), by = "Num_Acc") %>%
+  mutate(grav_label = recode(as.character(grav), !!!grav_labels)) %>%
+  count(an, grav_label) %>%
+  filter(!is.na(grav_label)) %>%
+  ggplot(aes(x = an, y = n, fill = grav_label)) +
+  geom_col() +
+  scale_fill_manual(values = c(
+    "Indemne"             = "#4caf50",
+    "Blessé léger"        = "#ff9800",
+    "Blessé hospitalisé"  = "#f44336",
+    "Tué"                 = "#212121"
+  )) +
+  labs(
+    title = "Répartition de la gravité par année",
+    x = NULL, y = NULL, fill = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+## Cartographie
+
+Les coordonnées GPS (WGS84) sont disponibles uniquement pour **2019 et après** (les données antérieures utilisent des coordonnées Lambert non converties).
+
+```{r carte}
+#| message: false
+#| warning: false
+
+# Diagnostic : distribution de lat/long dans caract_velo
+cat("Résumé lat :\n"); print(summary(caract_velo$lat))
+cat("Résumé long :\n"); print(summary(caract_velo$long))
+cat("Années avec lat non-NA :", caract_velo %>% filter(!is.na(lat)) %>% pull(an) %>% unique() %>% sort(), "\n")
+
+caract_velo_geo <- caract_velo %>%
+  filter(!is.na(lat), !is.na(long), lat != 0, long != 0)
+
+cat("Accidents vélo géolocalisés :", nrow(caract_velo_geo), "/", nrow(caract_velo), "\n")
+
+if (nrow(caract_velo_geo) > 0) {
+  library(leaflet)
+  leaflet(caract_velo_geo) %>%
+    addTiles() %>%
+    addCircleMarkers(
+      lng      = ~long,
+      lat      = ~lat,
+      radius   = 5,
+      color    = "#e05c1a",
+      stroke   = FALSE,
+      fillOpacity = 0.7,
+      popup    = ~paste0("<b>", an, "</b><br>", adr)
+    )
+}
+```
+
+## Conditions des accidents
+
+### Luminosité
+
+```{r luminosite}
+lum_labels <- c(
+  "1" = "Plein jour", "2" = "Crépuscule/aube",
+  "3" = "Nuit sans éclairage", "4" = "Nuit avec éclairage non allumé",
+  "5" = "Nuit avec éclairage allumé"
+)
+
+caract_velo %>%
+  mutate(lum_label = recode(as.character(lum), !!!lum_labels)) %>%
+  count(lum_label) %>%
+  mutate(lum_label = fct_reorder(lum_label, n, .desc = TRUE)) %>%
+  ggplot(aes(x = lum_label, y = n)) +
+  geom_col(fill = "#e05c1a", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Luminosité lors des accidents vélo", x = NULL, y = "Nombre d'accidents") +
+  theme_minimal()
+```
+
+### Type de collision
+
+```{r collision}
+col_labels <- c(
+  "1" = "Deux véhicules, frontale", "2" = "Deux véhicules, par l'arrière",
+  "3" = "Deux véhicules, par le côté", "4" = "3+ véhicules, en chaîne",
+  "5" = "3+ véhicules, collisions multiples", "6" = "Autre", "7" = "Sans collision"
+)
+
+caract_velo %>%
+  mutate(col_label = recode(as.character(col), !!!col_labels)) %>%
+  count(col_label) %>%
+  mutate(col_label = fct_reorder(col_label, n, .desc = TRUE)) %>%
+  ggplot(aes(x = col_label, y = n)) +
+  geom_col(fill = "#e05c1a", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Type de collision", x = NULL, y = "Nombre d'accidents") +
+  theme_minimal()
+```
+
+### Infrastructure (table lieux)
+
+```{r infrastructure}
+infra_labels <- c(
+  "0" = "Aucune",        "1" = "Souterrain/tunnel", "2" = "Pont/saut-de-mouton",
+  "3" = "Bretelle éch.", "4" = "Voie ferrée",        "5" = "Carrefour aménagé",
+  "6" = "Zone piétonne", "7" = "Zone de péage",      "8" = "Chantier",
+  "9" = "Autre"
+)
+
+lieux_velo %>%
+  mutate(infra_label = recode(as.character(infra), !!!infra_labels)) %>%
+  count(infra_label) %>%
+  mutate(infra_label = fct_reorder(infra_label, n, .desc = TRUE)) %>%
+  ggplot(aes(x = infra_label, y = n)) +
+  geom_col(fill = "#e05c1a", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Infrastructure routière au lieu de l'accident", x = NULL, y = "Nombre d'accidents") +
+  theme_minimal()
+```
+
+## Profil des cyclistes impliqués
+
+```{r sexe}
+usagers_velo %>%
+  filter(catu == 1) %>%   # conducteurs seulement (catu 1 = conducteur)
+  mutate(sexe_label = recode(as.character(sexe), "1" = "Masculin", "2" = "Féminin")) %>%
+  filter(!is.na(sexe_label)) %>%
+  count(sexe_label) %>%
+  ggplot(aes(x = sexe_label, y = n, fill = sexe_label)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_manual(values = c("Masculin" = "#1565c0", "Féminin" = "#c62828")) +
+  labs(title = "Sexe des cyclistes (conducteurs)", x = NULL, y = "Nombre") +
+  theme_minimal()
+```
+
+```{r age}
+#| message: false
+#| warning: false
+
+usagers_velo %>%
+  filter(catu == 1, !is.na(an_nais), an_nais > 1900) %>%
+  left_join(caract_velo %>% select(Num_Acc, an), by = "Num_Acc") %>%
+  mutate(age = an - an_nais) %>%
+  filter(age >= 0, age <= 100) %>%
+  ggplot(aes(x = age)) +
+  geom_histogram(binwidth = 5, fill = "#e05c1a", alpha = 0.8, colour = "white") +
+  labs(title = "Âge des cyclistes impliqués", x = "Âge", y = "Nombre") +
+  theme_minimal()
+```

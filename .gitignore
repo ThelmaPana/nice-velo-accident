@@ -50,6 +50,9 @@ rsconnect/
 
 # ======
 
+# Claude Code (worktrees, sessions, mémoire)
+.claude/
+
 # Données téléchargées (binaires, non versionnées)
 data/*.rds
 data/*.csv
