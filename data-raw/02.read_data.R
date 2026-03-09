@@ -166,8 +166,10 @@ normalize_caracteristiques <- function(df, annee) {
         an   = as.integer(an),
         dep  = as.integer(dep),
         com  = sprintf("%05d", as.integer(com)),  # 6088 -> "06088"
-        lat  = as.numeric(lat),
-        long = as.numeric(long),
+        # CSV BAAC >= 2019 utilise la virgule comme séparateur décimal (ex: "43,7119")
+        # On normalise en remplaçant la virgule par un point avant as.numeric()
+        lat  = as.numeric(gsub(",", ".", as.character(lat))),
+        long = as.numeric(gsub(",", ".", as.character(long))),
         # Bug API Tabular : hrmn HHMM entier parsé en date pour 2019-2023 -> NA
         hrmn = if_else(
           str_detect(coalesce(hrmn, ""), "^\\d{4}-\\d{2}-\\d{2}"),
@@ -223,7 +225,9 @@ for (yr in annees) {
 
   caract  <- normalize_caracteristiques(caract, yr)
   num_acc <- caract$Num_Acc
-  cat(" ", nrow(caract), "accidents", if (via_csv) "(via CSV)" else "(via API)", "\n")
+  n_geo   <- if ("lat" %in% names(caract)) sum(!is.na(caract$lat)) else 0L
+  cat(" ", nrow(caract), "accidents", if (via_csv) "(via CSV)" else "(via API)",
+      "—", n_geo, "géolocalisés\n")
 
   # Tables secondaires : même voie que les caractéristiques
   if (via_csv) {
