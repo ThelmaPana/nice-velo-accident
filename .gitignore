@@ -50,6 +50,10 @@ rsconnect/
 
 # ======
 
+# Données téléchargées (binaires, non versionnées)
+data/*.rds
+data/*.csv
+
 # renv
 renv/library/
 renv/staging/
