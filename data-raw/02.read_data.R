@@ -1,584 +1,268 @@
 #--------------------------------------------------------------------------#
 # Project: nice-velo-accident
-# Script purpose: Lire les datasets d’accidents à partir des RID
-# Date: 13/02/2026
+# Script purpose: Télécharger et normaliser les données d'accidents par commune
+# Date: 09/03/2026
 # Author: Thelma Panaïotis
-#--------------------------------------------------------------------------#
-
-
-## test ----
-#--------------------------------------------------------------------------#
-library(tidyverse)
-library(httr2)
-library(here)
-
-# Configuration
-base_url <- "https://tabular-api.data.gouv.fr/api/resources"
-nice_code <- "06088"
-
-# Lire le catalogue
-catalog <- read_csv(here("data-raw", "01.catalog.csv"), show_col_types = FALSE)
-
-# Filtrer pour les années voulues
-annees <- 2005:2024
-catalog_a_telecharger <- catalog %>%
-  filter(annee %in% annees)
-
-# Fonction pour caractéristiques (filtre avant)
-get_caracteristiques_nice <- function(resource_id, annee) {
-  print(paste(annee, "caracteristiques ..."))
-
-  url <- paste0(
-    base_url, "/", resource_id, "/data/",
-    "?com__exact=", nice_code
-  )
-
-  response <- request(url) %>% req_perform()
-  result <- resp_body_json(response)
-
-  total <- result$meta$total
-  print(paste("  Total:", total))
-
-  url_full <- paste0(url, "&page_size=", total)
-  response_full <- request(url_full) %>% req_perform()
-  result_full <- resp_body_json(response_full)
-
-  data <- map_dfr(result_full$data, as_tibble) |>
-    mutate(mois = as.integer(mois)) |>
-    select(-`__id`)
-
-  # Renommer Accident_Id en Num_Acc si nécessaire
-  if ("Accident_Id" %in% names(data)) {
-    data <- data %>% rename(Num_Acc = Accident_Id)
-  }
-
-  return(data)
-}
-
-get_data_by_num_acc <- function(resource_id, annee, type, num_acc_list) {
-  print(paste(annee, type, "..."))
-
-  tryCatch({
-    num_acc_string <- paste(as.character(num_acc_list), collapse = ",")
-
-    all_data <- list()
-    next_url <- paste0(
-      base_url, "/", resource_id, "/data/",
-      "?Num_Acc__in=", num_acc_string
-    )
-
-    page <- 1
-
-    while (!is.null(next_url)) {
-      print(paste("  Page", page))
-      response <- request(next_url) %>% req_perform()
-      result <- resp_body_json(response)
-
-      all_data[[page]] <- map_dfr(result$data, ~ as_tibble(compact(.x)))
-
-      next_url <- result$links$`next`
-      page <- page + 1
-    }
-
-    data <- bind_rows(all_data) |>
-      select(-`__id`)
-    print(paste("  Total:", nrow(data)))
-
-    return(data)
-
-  }, error = function(e) {
-    print(paste("  ERREUR:", conditionMessage(e)))
-    return(NULL)
-  })
-}
-
-get_data_by_url <- function(url) {
-
-  tryCatch({
-    temp_file <- tempfile(fileext = ".csv")
-    download.file(url, temp_file, mode = "wb", quiet = TRUE)
-
-    data <- read_delim(temp_file, delim = ",", locale = locale(encoding = "latin1"), show_col_types = FALSE)
-
-    unlink(temp_file)
-
-    print(paste("  Total:", nrow(data)))
-    return(data)
-
-  }, error = function(e) {
-    print(paste("  ERREUR:", conditionMessage(e)))
-    return(NULL)
-  })
-}
-
-foo <- get_data_by_url(toto) |> filter(com == "088")
-
-## All years ----
-#--------------------------------------------------------------------------#
-# Initialiser les listes pour stocker toutes les données
-all_caract <- list()
-all_lieux <- list()
-all_vehicules <- list()
-all_usagers <- list()
-
-# Initialiser le tracker d'erreurs
-erreurs <- tibble(annee = integer(), type = character(), resource_id = character(), erreur = character())
-
-
-# Boucle sur les années
-for (annee in annees) {
-  print(paste("=== Année", annee, "==="))
-
-  # 1. Caractéristiques
-  caract_rid <- catalog_a_telecharger %>%
-    filter(annee == !!annee, type == "caracteristiques") %>%
-    pull(resource_id)
-
-  if (length(caract_rid) > 0) {
-    caract <- get_caracteristiques_nice(caract_rid, annee)
-
-    if (is.null(caract)) {
-      erreurs <- bind_rows(erreurs, tibble(annee = annee, type = "caracteristiques", resource_id = caract_rid, erreur = "Échec récupération"))
-      next
-    }
-
-    num_acc_nice <- caract$Num_Acc
-    all_caract[[as.character(annee)]] <- caract
-
-    # 2. Lieux
-    lieux_rid <- catalog_a_telecharger %>%
-      filter(annee == !!annee, type == "lieux") %>%
-      pull(resource_id)
-
-    if (length(lieux_rid) > 0) {
-      lieux <- get_data_by_num_acc(lieux_rid, annee, "lieux", num_acc_nice) |> mutate(nbv = as.integer(nbv))
-      if (is.null(lieux)) {
-        erreurs <- bind_rows(erreurs, tibble(annee = annee, type = "lieux", resource_id = lieux_rid, erreur = "Échec récupération"))
-      } else {
-        all_lieux[[as.character(annee)]] <- lieux
-      }
-    }
-
-    # 3. Véhicules
-    vehicules_rid <- catalog_a_telecharger %>%
-      filter(annee == !!annee, type == "vehicules") %>%
-      pull(resource_id)
-
-    if (length(vehicules_rid) > 0) {
-      vehicules <- get_data_by_num_acc(vehicules_rid, annee, "vehicules", num_acc_nice)
-      if (is.null(vehicules)) {
-        erreurs <- bind_rows(erreurs, tibble(annee = annee, type = "vehicules", resource_id = vehicules_rid, erreur = "Échec récupération"))
-      } else {
-        all_vehicules[[as.character(annee)]] <- vehicules
-      }
-    }
-
-    # 4. Usagers
-    usagers_rid <- catalog_a_telecharger %>%
-      filter(annee == !!annee, type == "usagers") %>%
-      pull(resource_id)
-
-    if (length(usagers_rid) > 0) {
-      usagers <- get_data_by_num_acc(usagers_rid, annee, "usagers", num_acc_nice)
-      if (is.null(usagers)) {
-        erreurs <- bind_rows(erreurs, tibble(annee = annee, type = "usagers", resource_id = usagers_rid, erreur = "Échec récupération"))
-      } else {
-        all_usagers[[as.character(annee)]] <- usagers
-      }
-    }
-  }
-}
-
-# Combiner toutes les années
-caract_final <- bind_rows(all_caract)
-lieux_final <- bind_rows(all_lieux)
-vehicules_final <- bind_rows(all_vehicules)
-usagers_final <- bind_rows(all_usagers)
-
-ggplot(caract_final) +
-  geom_point(aes(x = long, y = lat, colour = an)) +
-  coord_quickmap()
-
-caract_final |> count(an)
-lieux_final |> left_join(caract_final) |> count(an)
-vehicules_final |> left_join(caract_final) |> count(an)
-usagers_final |> left_join(caract_final) |> count(an)
-
-erreurs
-# 2021 et 2024 ne peuvent pas être lus
-
-
-# Accidents impliquant des vélos
-vehicules_velo <- vehicules_final |> filter(catv == 1)
-acc_velo <- vehicules_velo |> pull(Num_Acc)
-
-acc_velo
-
-caract_velo <- caract_final |> filter(Num_Acc %in% acc_velo)
-lieux_velo <- lieux_final |> filter(Num_Acc %in% acc_velo)
-usagers_velo <- usagers_final |> filter(Num_Acc %in% acc_velo)
-
 #
-
-
-## Test code commune ----
+# Paramètres prévus pour le futur package R :
+#   - code_commune : code INSEE 5 caractères (ex: "06088" pour Nice)
+#   - annees       : vecteur d'années (ex: 2005:2024)
+#
+# Deux formats coexistent dans les données BAAC :
+#   - Ancien format (<= 2018) : dep encodé ×10 (ex: 590=Nord, 60=Alpes-Maritimes),
+#                               com dans le dep, an 2 chiffres,
+#                               hrmn HHMM entier, coordonnées Lambert
+#   - Nouveau format (>= 2019) : dep entier (6), com 5 chiffres (6088),
+#                                an 4 chiffres, hrmn "HH:MM"
+#
+# Stratégie de lecture :
+#   - Priorité à l'API Tabular (filtrage côté serveur, efficace)
+#   - Fallback sur lecture du CSV brut si la ressource n'est pas indexée
+#     (cas de certaines années : 2005, 2010-2012, potentiellement d'autres)
+#
+# Attention : l'API Tabular parse incorrectement hrmn en date pour 2019-2023
+#             (bug connu, valeurs mises à NA pour ces années).
 #--------------------------------------------------------------------------#
-get_data_by_url <- function(url) {
-  tryCatch({
-    temp_file <- tempfile(fileext = ".csv")
-    download.file(url, temp_file, mode = "wb", quiet = TRUE)
 
-    data <- read_delim(temp_file, delim = ",", locale = locale(encoding = "latin1"), show_col_types = FALSE)
-
-    unlink(temp_file)
-
-    print(paste("  Total:", nrow(data)))
-    return(data)
-
-  }, error = function(e) {
-    print(paste("  ERREUR:", conditionMessage(e)))
-    return(NULL)
-  })
-}
-
-# caract 2009 est un tsv
-
-test <- catalog_a_telecharger %>% filter(annee == 2019, type == "caracteristiques")
-data <- get_data_by_url(test$url)
-unique(data$com)[1:20]  # Voir les codes
-
-## all years ----
-#--------------------------------------------------------------------------#
 library(tidyverse)
 library(httr2)
 library(here)
 
-# Configuration
+
+## Configuration ----
+#--------------------------------------------------------------------------#
+# Paramètres futurs du package
+code_commune <- "06088"   # Code INSEE de Nice
+annees       <- 2005:2024
+
 base_url <- "https://tabular-api.data.gouv.fr/api/resources"
 
-# Lire le catalogue
-catalog <- read_csv("catalog_accidents_final.csv")
 
-# Filtrer pour les années voulues
-annees <- 2005:2024
-catalog_a_telecharger <- catalog %>%
+## Catalogue ----
+#--------------------------------------------------------------------------#
+catalog <- read_csv(here("data-raw", "01.catalog.csv"), show_col_types = FALSE) %>%
   filter(annee %in% annees)
 
-# ==============================================================================
-# FONCTIONS
-# ==============================================================================
 
-# Fonction pour caractéristiques (filtre avant via API)
-get_caracteristiques_nice <- function(resource_id, annee, code_commune, url_fallback = NULL) {
-  print(paste(annee, "caracteristiques ..."))
+## Fonctions utilitaires ----
+#--------------------------------------------------------------------------#
 
+# Décompose un code INSEE commune pour les deux formats de filtre
+# code : string 5 chars, ex "06088"
+parse_commune_code <- function(code) {
+  dep_int <- as.integer(substr(code, 1, 2))
+  com_int <- as.integer(substr(code, 3, 5))
+  list(
+    com_new  = code,                         # "06088" → API interprète comme entier 6088
+    dep_old  = as.integer(dep_int * 10),     # dep 06 → 60 (encodage ×10 ancien format)
+    com_old  = com_int                       # 88
+  )
+}
+
+# --- Voie 1 : API Tabular ---
+
+# Effectue une requête paginée sur l'API Tabular, retourne un tibble
+fetch_paginated <- function(url) {
+  all_data <- list()
+  next_url <- url
+  page     <- 1
+
+  while (!is.null(next_url)) {
+    resp   <- request(next_url) %>% req_perform()
+    result <- resp_body_json(resp)
+
+    if (length(result$data) > 0) {
+      all_data[[page]] <- map_dfr(result$data, ~ as_tibble(compact(.x)))
+    }
+
+    next_url <- result$links$`next`
+    page     <- page + 1
+  }
+
+  bind_rows(all_data)
+}
+
+# Récupère les caractéristiques filtrées par commune (API Tabular)
+fetch_caracteristiques_api <- function(resource_id, annee, codes) {
+  filter_str <- if (annee >= 2019) {
+    paste0("?com__exact=", codes$com_new, "&page_size=500")
+  } else {
+    paste0("?dep__exact=", codes$dep_old, "&com__exact=", codes$com_old, "&page_size=500")
+  }
+  url <- paste0(base_url, "/", resource_id, "/data/", filter_str)
+  fetch_paginated(url)
+}
+
+# Récupère une table secondaire filtrée par Num_Acc (API Tabular)
+fetch_by_num_acc_api <- function(resource_id, num_acc) {
+  if (length(num_acc) == 0) return(tibble())
+  num_acc_str <- paste(num_acc, collapse = ",")
   url <- paste0(
     base_url, "/", resource_id, "/data/",
-    "?com__exact=", code_commune
+    "?Num_Acc__in=", num_acc_str, "&page_size=500"
   )
-
-  tryCatch({
-    response <- request(url) %>% req_perform()
-    result <- resp_body_json(response)
-
-    total <- result$meta$total
-    print(paste("  Total:", total))
-
-    url_full <- paste0(url, "&page_size=", total)
-    response_full <- request(url_full) %>% req_perform()
-    result_full <- resp_body_json(response_full)
-
-    data <- map_dfr(result_full$data, as_tibble) %>%
-      mutate(mois = as.integer(mois))
-
-    # Renommer Accident_Id en Num_Acc si nécessaire
-    if ("Accident_Id" %in% names(data)) {
-      data <- data %>% rename(Num_Acc = Accident_Id)
-    }
-
-    return(data)
-
-  }, error = function(e) {
-    print(paste("  ERREUR API:", conditionMessage(e)))
-
-    # Fallback : téléchargement direct
-    if (!is.null(url_fallback)) {
-      print("  Tentative téléchargement direct...")
-      data_all <- get_data_by_url(url_fallback)
-
-      # DEBUG
-      print("Colonnes disponibles:")
-      print(names(data_all))
-      print("Code commune recherché:")
-      print(code_commune)
-
-      # Vérifier si la colonne existe
-      if (!"com" %in% names(data_all)) {
-        print("ATTENTION: colonne 'com' absente!")
-        return(NULL)
-      }
-
-      data <- data_all %>%
-        filter(com == code_commune) %>%
-        mutate(mois = as.integer(mois))
-
-      if ("Accident_Id" %in% names(data)) {
-        data <- data %>% rename(Num_Acc = Accident_Id)
-      }
-
-      return(data)
-    }
-
-    return(NULL)
-  })
+  fetch_paginated(url)
 }
 
-# Fonction pour autres tables (filtre après via Num_Acc)
-get_data_by_num_acc <- function(resource_id, annee, type, num_acc_list) {
-  print(paste(annee, type, "..."))
+# --- Voie 2 : CSV brut (fallback) ---
 
-  tryCatch({
-    num_acc_string <- paste(as.character(num_acc_list), collapse = ",")
-
-    all_data <- list()
-    next_url <- paste0(
-      base_url, "/", resource_id, "/data/",
-      "?Num_Acc__in=", num_acc_string
+# Lit un CSV BAAC en détectant automatiquement le séparateur parmi , \t ;
+# (les fichiers BAAC historiques varient : virgule en 2005/2012, tabulation en 2009...)
+# Toutes les colonnes sont lues en character pour éviter les problèmes de typage
+read_baac_csv <- function(url) {
+  for (delim in c(",", "\t", ";")) {
+    df <- read_delim(
+      url, delim = delim, show_col_types = FALSE,
+      col_types = cols(.default = col_character()), name_repair = "minimal"
     )
-
-    page <- 1
-
-    while (!is.null(next_url)) {
-      print(paste("  Page", page))
-      response <- request(next_url) %>% req_perform()
-      result <- resp_body_json(response)
-
-      all_data[[page]] <- map_dfr(result$data, ~ as_tibble(compact(.x)))
-
-      next_url <- result$links$`next`
-      page <- page + 1
-    }
-
-    data <- bind_rows(all_data)
-    print(paste("  Total:", nrow(data)))
-
-    return(data)
-
-  }, error = function(e) {
-    print(paste("  ERREUR:", conditionMessage(e)))
-    return(NULL)
-  })
+    if (ncol(df) > 1) return(df %>% rename_with(str_trim))
+  }
+  stop("Impossible de lire le CSV : séparateur non reconnu parmi , \\t ;")
 }
 
-# Fonction pour téléchargement direct par URL
-get_data_by_url <- function(url) {
-  tryCatch({
-    temp_file <- tempfile(fileext = ".csv")
-    download.file(url, temp_file, mode = "wb", quiet = TRUE)
-
-    #data <- read_delim(temp_file, delim = ",", locale = locale(encoding = "latin1"), show_col_types = FALSE)
-    data <- read_delim(temp_file, locale = locale(encoding = "latin1"), show_col_types = FALSE)
-
-    unlink(temp_file)
-
-    print(paste("  Total:", nrow(data)))
-    return(data)
-
-  }, error = function(e) {
-    print(paste("  ERREUR:", conditionMessage(e)))
-    return(NULL)
-  })
-}
-
-# ==============================================================================
-# BOUCLE
-# ==============================================================================
-
-# Initialiser les listes
-all_caract <- list()
-all_lieux <- list()
-all_vehicules <- list()
-all_usagers <- list()
-erreurs <- tibble(annee = integer(), type = character(), resource_id = character(), erreur = character())
-
-# Boucle sur les années
-
-for (annee in annees) {
-  print(paste("=== Année", annee, "==="))
-
-  # Code commune selon l'année
-  code_commune <- if (annee < 2019) "088" else "06088"
-
-  # 1. Caractéristiques
-  caract_rid <- catalog_a_telecharger %>%
-    filter(annee == !!annee, type == "caracteristiques") %>%
-    pull(resource_id)
-
-  caract_url <- catalog_a_telecharger %>%
-    filter(annee == !!annee, type == "caracteristiques") %>%
-    pull(url)
-
-  if (length(caract_rid) > 0) {
-    caract <- get_caracteristiques_nice(caract_rid, annee, code_commune, caract_url)
-
-    if (is.null(caract)) {
-      erreurs <- bind_rows(erreurs, tibble(annee = annee, type = "caracteristiques", resource_id = caract_rid, erreur = "Échec récupération"))
-      next
-    }
-
-    num_acc_nice <- caract$Num_Acc
-    all_caract[[as.character(annee)]] <- caract
-
-    # 2. Lieux
-    lieux_rid <- catalog_a_telecharger %>%
-      filter(annee == !!annee, type == "lieux") %>%
-      pull(resource_id)
-
-    lieux_url <- catalog_a_telecharger %>%
-      filter(annee == !!annee, type == "lieux") %>%
-      pull(url)
-
-    if (length(lieux_rid) > 0) {
-      lieux <- get_data_by_num_acc(lieux_rid, annee, "lieux", num_acc_nice)
-
-      # Fallback si échec API
-      if (is.null(lieux) && length(lieux_url) > 0) {
-        print("  Tentative téléchargement direct...")
-        lieux_all <- get_data_by_url(lieux_url)
-
-        # Renommer si nécessaire
-        if ("Accident_Id" %in% names(lieux_all)) {
-          lieux_all <- lieux_all %>% rename(Num_Acc = Accident_Id)
-        }
-
-        lieux <- lieux_all %>%
-          filter(Num_Acc %in% num_acc_nice) %>%
-          mutate(nbv = as.integer(nbv))
-      }
-
-      if (is.null(lieux)) {
-        erreurs <- bind_rows(erreurs, tibble(annee = annee, type = "lieux", resource_id = lieux_rid, erreur = "Échec récupération"))
-      } else {
-        all_lieux[[as.character(annee)]] <- lieux
-      }
-    }
-
-    # 3. Véhicules
-    vehicules_rid <- catalog_a_telecharger %>%
-      filter(annee == !!annee, type == "vehicules") %>%
-      pull(resource_id)
-
-    vehicules_url <- catalog_a_telecharger %>%
-      filter(annee == !!annee, type == "vehicules") %>%
-      pull(url)
-
-    if (length(vehicules_rid) > 0) {
-      vehicules <- get_data_by_num_acc(vehicules_rid, annee, "vehicules", num_acc_nice)
-
-      # Fallback si échec API
-      if (is.null(vehicules) && length(vehicules_url) > 0) {
-        print("  Tentative téléchargement direct...")
-        vehicules_all <- get_data_by_url(vehicules_url)
-
-        if ("Accident_Id" %in% names(vehicules_all)) {
-          vehicules_all <- vehicules_all %>% rename(Num_Acc = Accident_Id)
-        }
-
-        vehicules <- vehicules_all %>%
-          filter(Num_Acc %in% num_acc_nice)
-      }
-
-      if (is.null(vehicules)) {
-        erreurs <- bind_rows(erreurs, tibble(annee = annee, type = "vehicules", resource_id = vehicules_rid, erreur = "Échec récupération"))
-      } else {
-        all_vehicules[[as.character(annee)]] <- vehicules
-      }
-    }
-
-    # 4. Usagers
-    usagers_rid <- catalog_a_telecharger %>%
-      filter(annee == !!annee, type == "usagers") %>%
-      pull(resource_id)
-
-    usagers_url <- catalog_a_telecharger %>%
-      filter(annee == !!annee, type == "usagers") %>%
-      pull(url)
-
-    if (length(usagers_rid) > 0) {
-      usagers <- get_data_by_num_acc(usagers_rid, annee, "usagers", num_acc_nice)
-
-      # Fallback si échec API
-      if (is.null(usagers) && length(usagers_url) > 0) {
-        print("  Tentative téléchargement direct...")
-        usagers_all <- get_data_by_url(usagers_url)
-
-        if ("Accident_Id" %in% names(usagers_all)) {
-          usagers_all <- usagers_all %>% rename(Num_Acc = Accident_Id)
-        }
-
-        usagers <- usagers_all %>%
-          filter(Num_Acc %in% num_acc_nice)
-      }
-
-      if (is.null(usagers)) {
-        erreurs <- bind_rows(erreurs, tibble(annee = annee, type = "usagers", resource_id = usagers_rid, erreur = "Échec récupération"))
-      } else {
-        all_usagers[[as.character(annee)]] <- usagers
-      }
-    }
+# Récupère les caractéristiques filtrées par commune (CSV brut)
+fetch_caracteristiques_csv <- function(url_csv, annee, codes) {
+  df <- read_baac_csv(url_csv)
+  if (annee >= 2019) {
+    df %>% filter(as.integer(com) == as.integer(codes$com_new))
+  } else {
+    df %>% filter(
+      as.integer(dep) == codes$dep_old,
+      as.integer(com) == codes$com_old
+    )
   }
 }
 
-# ==============================================================================
-# CONSOLIDATION ET SAUVEGARDE
-# ==============================================================================
+# Récupère une table secondaire filtrée par Num_Acc (CSV brut)
+fetch_by_num_acc_csv <- function(url_csv, num_acc) {
+  df <- read_baac_csv(url_csv)
+  df %>% filter(as.character(Num_Acc) %in% as.character(num_acc))
+}
 
-# Combiner toutes les années
-caract_final <- bind_rows(all_caract)
-lieux_final <- bind_rows(all_lieux)
-vehicules_final <- bind_rows(all_vehicules)
-usagers_final <- bind_rows(all_usagers)
+# --- Normalisation ---
+
+# Normalise les caractéristiques pour homogénéiser les deux formats
+# Colonnes en sortie : Num_Acc, jour, mois, an, hrmn, lum, dep, com,
+#                      agg, int, atm, col, adr, lat, long
+normalize_caracteristiques <- function(df, annee) {
+  df <- df %>% select(-any_of("__id"))
+
+  if (annee <= 2018) {
+    df <- df %>%
+      mutate(
+        an   = 2000L + as.integer(an),
+        hrmn = sprintf("%04d", as.integer(hrmn)),
+        hrmn = paste0(substr(hrmn, 1, 2), ":", substr(hrmn, 3, 4)),
+        dep  = as.integer(dep) %/% 10L,          # 60 -> 6, 590 -> 59
+        com  = sprintf("%02d%03d", dep, as.integer(com)),  # reconstitue "06088"
+        lat  = NA_real_,                          # Lambert non converti -> NA
+        long = NA_real_
+      ) %>%
+      select(-any_of("gps"))
+
+  } else {
+    df <- df %>%
+      mutate(
+        an   = as.integer(an),
+        dep  = as.integer(dep),
+        com  = sprintf("%05d", as.integer(com)),  # 6088 -> "06088"
+        lat  = as.numeric(lat),
+        long = as.numeric(long),
+        # Bug API Tabular : hrmn HHMM entier parsé en date pour 2019-2023 -> NA
+        hrmn = if_else(
+          str_detect(coalesce(hrmn, ""), "^\\d{4}-\\d{2}-\\d{2}"),
+          NA_character_,
+          hrmn
+        )
+      )
+  }
+
+  df
+}
+
+clean_table <- function(df) df %>% select(-any_of("__id"))
 
 
-
-## Test URL ----
+## Téléchargement ----
 #--------------------------------------------------------------------------#
-test_annee <- function(annee_test) {
-  print(paste("=== TEST", annee_test, "==="))
+codes <- parse_commune_code(code_commune)
 
-  code_commune <- if (annee_test < 2019) "088" else "06088"
+all_caract    <- list()
+all_lieux     <- list()
+all_vehicules <- list()
+all_usagers   <- list()
 
-  caract_url <- catalog_a_telecharger %>%
-    filter(annee == annee_test, type == "caracteristiques") %>%
-    pull(url)
+for (yr in annees) {
+  cat("\n=== Année", yr, "===\n")
 
-  temp_file <- tempfile(fileext = ".csv")
-  download.file(caract_url, temp_file, mode = "wb", quiet = TRUE)
+  cat_yr <- catalog %>% filter(annee == yr)
+  if (nrow(cat_yr) == 0) { cat("  Pas de données dans le catalogue\n"); next }
 
-  # Essayer avec fread
-  library(data.table)
-  data_all <- fread(temp_file, encoding = "UTF-8") %>% as_tibble()
+  rid_caract    <- cat_yr %>% filter(type == "caracteristiques") %>% pull(resource_id)
+  rid_lieux     <- cat_yr %>% filter(type == "lieux")            %>% pull(resource_id)
+  rid_vehicules <- cat_yr %>% filter(type == "vehicules")        %>% pull(resource_id)
+  rid_usagers   <- cat_yr %>% filter(type == "usagers")          %>% pull(resource_id)
 
-  unlink(temp_file)
+  url_caract    <- cat_yr %>% filter(type == "caracteristiques") %>% pull(url)
+  url_lieux     <- cat_yr %>% filter(type == "lieux")            %>% pull(url)
+  url_vehicules <- cat_yr %>% filter(type == "vehicules")        %>% pull(url)
+  url_usagers   <- cat_yr %>% filter(type == "usagers")          %>% pull(url)
 
-  print(paste("Lignes totales:", nrow(data_all)))
-  print("Colonnes:")
-  print(names(data_all))
-
-  if ("com" %in% names(data_all)) {
-    print("20 premiers codes commune:")
-    print(head(unique(data_all$com), 20))
-
-    # Filtre qui marche pour les deux types
-    if (is.numeric(data_all$com)) {
-      data_nice <- data_all %>% filter(com == as.integer(code_commune))
-    } else {
-      data_nice <- data_all %>% filter(com == code_commune)
+  # Caractéristiques : API Tabular en priorité, CSV en fallback
+  result <- tryCatch(
+    list(data = fetch_caracteristiques_api(rid_caract, yr, codes), via_csv = FALSE),
+    error = function(e) {
+      cat("  API Tabular indisponible, lecture du CSV brut\n")
+      list(data = fetch_caracteristiques_csv(url_caract, yr, codes), via_csv = TRUE)
     }
-    print(paste("Lignes Nice:", nrow(data_nice)))
+  )
+  caract  <- result$data
+  via_csv <- result$via_csv
+
+  if (nrow(caract) == 0) { cat("  Aucun accident trouvé pour", code_commune, "\n"); next }
+
+  caract  <- normalize_caracteristiques(caract, yr)
+  num_acc <- caract$Num_Acc
+  cat(" ", nrow(caract), "accidents", if (via_csv) "(via CSV)" else "(via API)", "\n")
+
+  # Tables secondaires : même voie que les caractéristiques
+  if (via_csv) {
+    lieux     <- fetch_by_num_acc_csv(url_lieux,     num_acc) %>% clean_table()
+    vehicules <- fetch_by_num_acc_csv(url_vehicules, num_acc) %>% clean_table()
+    usagers   <- fetch_by_num_acc_csv(url_usagers,   num_acc) %>% clean_table()
+  } else {
+    lieux     <- fetch_by_num_acc_api(rid_lieux,     num_acc) %>% clean_table()
+    vehicules <- fetch_by_num_acc_api(rid_vehicules, num_acc) %>% clean_table()
+    usagers   <- fetch_by_num_acc_api(rid_usagers,   num_acc) %>% clean_table()
   }
 
-  return(data_all)
+  all_caract[[as.character(yr)]]    <- caract
+  all_lieux[[as.character(yr)]]     <- lieux
+  all_vehicules[[as.character(yr)]] <- vehicules
+  all_usagers[[as.character(yr)]]   <- usagers
 }
 
-test_2006 <- test_annee(2012)
+
+## Assemblage et sauvegarde ----
+#--------------------------------------------------------------------------#
+# bind_rows gère les colonnes qui diffèrent entre années
+# (ex : env1 absent en 2024, vma absent en 2016) -> colonnes manquantes remplies par NA
+
+caracteristiques <- bind_rows(all_caract)
+lieux            <- bind_rows(all_lieux)
+vehicules        <- bind_rows(all_vehicules)
+usagers          <- bind_rows(all_usagers)
+
+saveRDS(caracteristiques, here("data", "caracteristiques.rds"))
+saveRDS(lieux,            here("data", "lieux.rds"))
+saveRDS(vehicules,        here("data", "vehicules.rds"))
+saveRDS(usagers,          here("data", "usagers.rds"))
+
+cat(
+  "\nSauvegardé dans data/ :",
+  "\n  caracteristiques.rds :", nrow(caracteristiques), "lignes",
+  "\n  lieux.rds            :", nrow(lieux), "lignes",
+  "\n  vehicules.rds        :", nrow(vehicules), "lignes",
+  "\n  usagers.rds          :", nrow(usagers), "lignes",
+  "\n"
+)
