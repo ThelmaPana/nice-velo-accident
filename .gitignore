@@ -47,3 +47,29 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# ======
+
+# Claude Code (worktrees, sessions, mémoire)
+.claude/
+
+# Données téléchargées (binaires, non versionnées)
+data/*.rds
+data/*.csv
+
+# renv
+renv/library/
+renv/staging/
+renv/local/
+
+# Quarto
+analysis/_site/
+analysis/.quarto/
+analysis/*_cache/
+analysis/*_files/
+
+# App
+app/rsconnect/
+app/renv/
+
+
