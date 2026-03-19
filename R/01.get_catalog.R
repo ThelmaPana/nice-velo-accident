@@ -82,5 +82,5 @@ catalog <- catalog %>%
   filter(!is.na(type), !is.na(annee), !str_detect(tolower(title), "immatricule"))
 
 # Save
-write_csv(catalog, here("data-raw", "01.catalog.csv"))
+write_csv(catalog, here("data", "01.catalog.csv"))
 

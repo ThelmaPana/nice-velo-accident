@@ -20,8 +20,6 @@
 #   - Fallback sur lecture du CSV brut si la ressource n'est pas indexée
 #     (cas de certaines années : 2005, 2010-2012, potentiellement d'autres)
 #
-# Attention : l'API Tabular parse incorrectement hrmn en date pour 2019-2023
-#             (bug connu, valeurs mises à NA pour ces années).
 #--------------------------------------------------------------------------#
 
 library(tidyverse)
@@ -40,7 +38,7 @@ base_url <- "https://tabular-api.data.gouv.fr/api/resources"
 
 ## Catalogue ----
 #--------------------------------------------------------------------------#
-catalog <- read_csv(here("data-raw", "01.catalog.csv"), show_col_types = FALSE) %>%
+catalog <- read_csv(here("data", "01.catalog.csv"), show_col_types = FALSE) %>%
   filter(annee %in% annees)
 
 
@@ -147,6 +145,11 @@ fetch_by_num_acc_csv <- function(url_csv, num_acc) {
 normalize_caracteristiques <- function(df, annee) {
   df <- df %>% select(-any_of("__id"))
 
+  # Renommer Accident_Id en Num_Acc si nécessaire (2019+)
+  if ("Accident_Id" %in% names(df) && !"Num_Acc" %in% names(df)) {
+    df <- df %>% rename(Num_Acc = Accident_Id)
+  }
+
   if (annee <= 2018) {
     df <- df %>%
       mutate(
@@ -182,7 +185,16 @@ normalize_caracteristiques <- function(df, annee) {
   df
 }
 
-clean_table <- function(df) df %>% select(-any_of("__id"))
+clean_table <- function(df) {
+  df <- df %>% select(-any_of("__id"))
+
+  # Renommer Accident_Id en Num_Acc si nécessaire
+  if ("Accident_Id" %in% names(df) && !"Num_Acc" %in% names(df)) {
+    df <- df %>% rename(Num_Acc = Accident_Id)
+  }
+
+  df
+}
 
 
 ## Téléchargement ----
@@ -257,10 +269,10 @@ lieux            <- bind_rows(all_lieux)
 vehicules        <- bind_rows(all_vehicules)
 usagers          <- bind_rows(all_usagers)
 
-saveRDS(caracteristiques, here("data", "caracteristiques.rds"))
-saveRDS(lieux,            here("data", "lieux.rds"))
-saveRDS(vehicules,        here("data", "vehicules.rds"))
-saveRDS(usagers,          here("data", "usagers.rds"))
+saveRDS(caracteristiques, here("data", "02.caracteristiques.rds"))
+saveRDS(lieux,            here("data", "02.lieux.rds"))
+saveRDS(vehicules,        here("data", "02.vehicules.rds"))
+saveRDS(usagers,          here("data", "02.usagers.rds"))
 
 cat(
   "\nSauvegardé dans data/ :",
@@ -270,3 +282,4 @@ cat(
   "\n  usagers.rds          :", nrow(usagers), "lignes",
   "\n"
 )
+
