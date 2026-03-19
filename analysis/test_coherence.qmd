@@ -1,0 +1,664 @@
+---
+title: "Tests de cohérence des données"
+author: "Thelma Panaïotis"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    embed-resources: true
+    theme: cosmo
+lang: fr
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| message: false
+
+library(tidyverse)
+library(here)
+library(gt)
+
+# Chargement des données nettoyées
+caract_velo <-      readRDS(here("data", "03.caracteristiques_velo_clean.rds"))
+usagers_velo <-     readRDS(here("data", "03.usagers_velo_clean.rds"))
+vehicules_velo <-   readRDS(here("data", "03.vehicules_velo_clean.rds"))
+config_accidents <- readRDS(here("data", "03.config_accidents.rds"))
+
+# Données complètes pour certains tests
+caracteristiques <- readRDS(here("data", "03.caracteristiques_clean.rds"))
+usagers <-          readRDS(here("data", "03.usagers_clean.rds"))
+vehicules <-        readRDS(here("data", "03.vehicules_clean.rds"))
+```
+
+
+## Vue d'ensemble
+```{r}
+#| label: vue-ensemble
+
+tibble(
+  Indicateur = c(
+    "Accidents total Nice",
+    "Accidents impliquant un vélo",
+    "Vélos (véhicules)",
+    "Cyclistes (usagers)",
+    "Conducteurs de vélo",
+    "Passagers vélo"
+  ),
+  Nombre = c(
+    n_distinct(caracteristiques$Num_Acc),
+    n_distinct(caract_velo$Num_Acc),
+    vehicules_velo %>% filter(catv %in% c(1, 80)) %>% nrow(),
+    usagers_velo %>% nrow(),
+    usagers_velo %>% filter(catu == 1) %>% nrow(),
+    usagers_velo %>% filter(catu == 2) %>% nrow()
+  )
+) %>%
+  gt() %>%
+  tab_header(title = "Statistiques descriptives")
+```
+
+::: {.callout-note}
+## Cohérence des chiffres
+
+- **548 accidents** impliquant un vélo
+- **567 vélos** (19 accidents ont 2 vélos → accidents vélo vs vélo)
+- **566 cyclistes** (561 conducteurs + 5 passagers)
+- **6 vélos sans conducteur** (567 - 561)
+
+**Anomalie :** 6 vélos sans conducteur enregistré dans la base BAAC. Cela peut indiquer :
+
+- Des erreurs de saisie
+- Des vélos abandonnés/volés impliqués dans l'accident
+- Des données incomplètes
+
+Ces 6 vélos seront identifiés dans le Test 1.3 pour investigation.
+:::
+
+---
+
+# 1. Tests de structure des données
+
+## Test 1.1 : Véhicules vs Usagers cyclistes
+
+Attendu : Nombre de cyclistes supérieur ou égal au nombre de vélos (car passagers possibles)
+```{r}
+#| label: test-1-1
+
+n_velos <- vehicules_velo %>% 
+  filter(catv %in% c(1, 80)) %>% 
+  nrow()
+
+n_cyclistes <- usagers_velo %>% 
+  filter(catu %in% c(1, 2)) %>% 
+  nrow()
+
+resultat_1_1 <- ifelse(n_cyclistes >= n_velos, "Ok", "Problème")
+
+tibble(
+  Métrique = c("Vélos (véhicules)", "Cyclistes (usagers)", "Différence", "Résultat"),
+  Valeur = as.character(c(n_velos, n_cyclistes, n_cyclistes - n_velos, resultat_1_1))
+) %>%
+  gt()
+```
+
+::: {.callout-warning}
+## Anomalie détectée
+
+- **567 vélos** (véhicules)
+- **566 cyclistes** dont **5 passagers**
+- Donc **561 conducteurs** pour **567 vélos**
+
+→ **6 vélos sans conducteur**, ce qui est anormal et nécessite une investigation (voir Test 1.3).
+:::
+
+## Test 1.2 : Chaque accident a au moins 1 vélo
+
+Attendu : 0 accident sans vélo dans la table caract_velo
+```{r}
+#| label: test-1-2
+
+accidents_sans_velo <- caract_velo %>%
+  anti_join(
+    vehicules_velo %>% filter(catv %in% c(1, 80)),
+    by = "Num_Acc"
+  )
+
+resultat_1_2 <- ifelse(nrow(accidents_sans_velo) == 0, "Ok", "Problème")
+
+tibble(
+  Test = "Accidents sans vélo",
+  Nombre = nrow(accidents_sans_velo),
+  Résultat = resultat_1_2
+) %>%
+  gt()
+```
+
+## Test 1.3 : Chaque vélo a au moins 1 conducteur
+
+Attendu : 0 vélo sans conducteur
+```{r}
+#| label: test-1-3
+
+velos_sans_conducteur <- vehicules_velo %>%
+  filter(catv %in% c(1, 80)) %>%
+  anti_join(
+    usagers_velo %>% filter(catu == 1),
+    by = c("Num_Acc", "num_veh")
+  )
+
+resultat_1_3 <- ifelse(nrow(velos_sans_conducteur) == 0, "Ok", "Problème")
+
+tibble(
+  Test = "Vélos sans conducteur",
+  Nombre = nrow(velos_sans_conducteur),
+  Résultat = resultat_1_3
+) %>%
+  gt()
+```
+
+::: {.callout-warning}
+## À investiguer
+
+6 vélos sans conducteur ont été identifiés. Ces cas nécessitent une vérification manuelle dans la base BAAC pour déterminer :
+- S'il s'agit d'erreurs de saisie
+- Si ce sont des vélos abandonnés/stationnés impliqués dans l'accident
+- Si les données des conducteurs sont simplement manquantes
+
+**Action recommandée :** Examiner manuellement les 6 accidents concernés.
+:::
+
+## Test 1.4 : Pas de doublons
+
+Chaque Num_Acc doit être unique dans la table caract_velo.
+```{r}
+#| label: test-1-4
+
+doublons <- caract_velo %>%
+  count(Num_Acc) %>%
+  filter(n > 1)
+
+resultat_1_4 <- ifelse(nrow(doublons) == 0, "Ok", "Problème")
+
+tibble(
+  Test = "Accidents en doublon",
+  Nombre = nrow(doublons),
+  Résultat = resultat_1_4
+) %>%
+  gt()
+```
+
+---
+
+# 2. Tests de configurations d'accidents
+
+## Test 2.1 : Configuration Vélo seul cohérente
+
+Attendu : Les accidents "Vélo seul" ont exactement 1 véhicule
+```{r}
+#| label: test-2-1
+
+config_velo_seul_pb <- config_accidents %>%
+  filter(configuration == "Vélo seul") %>%
+  filter(n_total != 1)
+
+resultat_2_1 <- ifelse(nrow(config_velo_seul_pb) == 0, "Ok", "Problème")
+
+tibble(
+  Test = "Vélo seul avec n_total différent de 1",
+  Nombre = nrow(config_velo_seul_pb),
+  Résultat = resultat_2_1
+) %>%
+  gt()
+```
+
+## Test 2.2 : Piétons dans accidents Vélo vs piéton
+
+Les accidents "Vélo vs piéton" doivent avoir des piétons dans la table usagers.
+```{r}
+#| label: test-2-2
+
+accidents_velo_pieton <- config_accidents %>%
+  filter(configuration == "Vélo vs piéton") %>%
+  pull(Num_Acc)
+
+pietons_dans_accidents <- usagers %>%
+  filter(Num_Acc %in% accidents_velo_pieton, catu == 3) %>%
+  nrow()
+
+resultat_2_2 <- ifelse(pietons_dans_accidents > 0, "Ok", "Problème")
+
+tibble(
+  Test = "Piétons dans accidents Vélo vs piéton",
+  Nombre = pietons_dans_accidents,
+  Résultat = resultat_2_2
+) %>%
+  gt()
+```
+
+## Test 2.3 : Piétons absents de vehicules
+
+Les piétons ne doivent être que dans usagers, jamais dans vehicules.
+```{r}
+#| label: test-2-3
+
+accidents_pieton <- config_accidents %>%
+  filter(configuration == "Vélo vs piéton") %>%
+  pull(Num_Acc)
+
+pietons_vehicules <- vehicules %>%
+  filter(Num_Acc %in% accidents_pieton) %>%
+  filter(catv == 3 | catv == "pieton")
+
+resultat_2_3 <- ifelse(nrow(pietons_vehicules) == 0, "Ok", "Problème")
+
+tibble(
+  Test = "Piétons dans table vehicules",
+  Nombre = nrow(pietons_vehicules),
+  Résultat = resultat_2_3
+) %>%
+  gt()
+```
+
+## Test 2.4 : Somme des configurations
+
+La somme des configurations doit être égale au nombre total d'accidents vélo.
+```{r}
+#| label: test-2-4
+
+n_total_accidents <- n_distinct(caract_velo$Num_Acc)
+n_total_config <- nrow(config_accidents)
+
+resultat_2_4 <- ifelse(n_total_config == n_total_accidents, "Ok", "Problème")
+
+config_accidents %>%
+  count(configuration, sort = TRUE) %>%
+  bind_rows(tibble(configuration = "Total", n = sum(.$n))) %>%
+  mutate(
+    pct = round(n / n_total_config * 100, 1),
+    Résultat = ifelse(configuration == "Total", resultat_2_4, "")
+  ) %>%
+  gt() %>%
+  tab_header(title = "Répartition des configurations d'accidents")
+```
+
+## Test 2.5 : n_total cohérent
+
+Le n_total de config_accidents doit correspondre au vrai nombre de véhicules.
+```{r}
+#| label: test-2-5
+
+verif_n_total <- vehicules_velo %>%
+  count(Num_Acc, name = "n_vehicules_reel") %>%
+  inner_join(
+    config_accidents %>% select(Num_Acc, n_total),
+    by = "Num_Acc"
+  ) %>%
+  filter(n_vehicules_reel != n_total)
+
+resultat_2_5 <- ifelse(nrow(verif_n_total) == 0, "Ok", "Problème")
+
+tibble(
+  Test = "Incohérence n_total configurations",
+  Nombre = nrow(verif_n_total),
+  Résultat = resultat_2_5
+) %>%
+  gt()
+```
+
+---
+
+# 3. Tests de validité temporelle
+
+## Test 3.1 : Années cohérentes
+
+Les années doivent être comprises entre 2005 et 2024.
+```{r}
+#| label: test-3-1
+
+annees <- caract_velo %>%
+  count(an) %>%
+  arrange(an)
+
+annees_pb <- annees %>%
+  filter(an < 2005 | an > 2024)
+
+resultat_3_1 <- ifelse(nrow(annees_pb) == 0, "Ok", "Problème")
+
+tibble(
+  Test = "Années hors période 2005-2024",
+  Nombre = nrow(annees_pb),
+  Résultat = resultat_3_1
+) %>%
+  gt()
+```
+```{r}
+#| label: plot-annees
+#| echo: false
+
+annees %>%
+  ggplot(aes(x = an, y = n)) +
+  geom_col(fill = "#0A3D62", alpha = 0.8) +
+  labs(title = "Nombre d'accidents vélo par année", x = NULL, y = "Nombre") +
+  theme_minimal()
+```
+
+## Test 3.2 : Mois entre 1 et 12
+
+Les mois doivent être compris entre 1 et 12.
+```{r}
+#| label: test-3-2
+
+mois_invalides <- caract_velo %>%
+  mutate(mois_num = as.integer(mois)) %>%
+  filter(!is.na(mois_num), (mois_num < 1 | mois_num > 12))
+
+resultat_3_2 <- ifelse(nrow(mois_invalides) == 0, "Ok", "Problème")
+
+tibble(
+  Test = "Mois hors plage 1-12",
+  Nombre = nrow(mois_invalides),
+  Résultat = resultat_3_2
+) %>%
+  gt()
+```
+
+## Test 3.3 : Format heure HH:MM
+
+Le format hrmn doit être HH:MM.
+```{r}
+#| label: test-3-3
+
+heures_invalides <- caract_velo %>%
+  filter(!is.na(hrmn), hrmn != "", !str_detect(hrmn, "^\\d{2}:\\d{2}$"))
+
+resultat_3_3 <- ifelse(nrow(heures_invalides) == 0, "Ok", "À vérifier")
+
+tibble(
+  Test = "Format heure invalide (pas HH:MM)",
+  Nombre = nrow(heures_invalides),
+  Résultat = resultat_3_3
+) %>%
+  gt()
+```
+
+## Test 3.4 : Âges cohérents
+
+Les âges doivent être compris entre 0 et 120 ans.
+```{r}
+#| label: test-3-4
+
+ages_pb <- usagers_velo %>%
+  filter(catu == 1) %>%
+  left_join(caract_velo %>% select(Num_Acc, an), by = "Num_Acc") %>%
+  mutate(age = an - an_nais) %>%
+  filter(!is.na(age)) %>%
+  filter(age < 0 | age > 120)
+
+resultat_3_4 <- ifelse(nrow(ages_pb) == 0, "Ok", "À vérifier")
+
+tibble(
+  Test = "Âges aberrants (< 0 ou > 120)",
+  Nombre = nrow(ages_pb),
+  Résultat = resultat_3_4
+) %>%
+  gt()
+```
+
+---
+
+# 4. Tests de validité géographique
+
+## Test 4.1 : GPS dans limites de Nice
+
+Les coordonnées GPS doivent être dans les limites de Nice (lat ~43.6-43.75, long ~7.2-7.3).
+```{r}
+#| label: test-4-1
+
+coords_aberrantes <- caract_velo %>%
+  filter(an >= 2019, !is.na(lat), !is.na(long), lat != 0, long != 0) %>%
+  filter(lat < 43.6 | lat > 43.75 | long < 7.2 | long > 7.3)
+
+resultat_4_1 <- ifelse(nrow(coords_aberrantes) <= 5, "Ok", "À vérifier")
+
+tibble(
+  Test = "Coordonnées GPS hors limites Nice",
+  Nombre = nrow(coords_aberrantes),
+  Résultat = resultat_4_1
+) %>%
+  gt()
+```
+
+::: {.callout-note}
+## À vérifier
+
+Les coordonnées GPS hors limites de Nice peuvent correspondre à :
+- Accidents en périphérie (Villefranche, Saint-Laurent-du-Var, etc.)
+- Erreurs de saisie dans la base BAAC
+- Problèmes de géocodage
+
+**Action :** Examiner manuellement les accidents concernés pour déterminer s'il s'agit d'erreurs ou d'accidents légitimes en bordure de commune.
+:::
+
+## Test 4.2 : GPS uniquement >= 2019
+
+Il ne devrait pas y avoir de GPS avant 2019.
+```{r}
+#| label: test-4-2
+
+gps_avant_2019 <- caract_velo %>%
+  filter(an < 2019, !is.na(lat), !is.na(long), lat != 0, long != 0)
+
+resultat_4_2 <- ifelse(nrow(gps_avant_2019) == 0, "Ok", "À vérifier")
+
+tibble(
+  Test = "GPS avant 2019",
+  Nombre = nrow(gps_avant_2019),
+  Résultat = resultat_4_2
+) %>%
+  gt()
+```
+
+---
+
+# 5. Tests de complétude des données
+
+## Test 5.1 : Gravité des cyclistes renseignée
+
+Tous les cyclistes devraient avoir une gravité renseignée.
+```{r}
+#| label: test-5-1
+
+usagers_velo %>%
+  filter(catu %in% c(1, 2)) %>%
+  count(grav_label) %>%
+  mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  gt() %>%
+  tab_header(title = "Répartition de la gravité des cyclistes")
+```
+
+
+## Test 5.2 : Taux de renseignement
+
+Les variables importantes doivent être bien renseignées (> 90% attendu).
+```{r}
+#| label: test-5-2
+
+taux_renseignement <- caract_velo %>%
+  summarise(
+    Luminosité = round(sum(!is.na(lum) & lum != -1) / n() * 100, 1),
+    `Conditions atmosphériques` = round(sum(!is.na(atm) & atm != -1) / n() * 100, 1),
+    Collision = round(sum(!is.na(col) & col != -1) / n() * 100, 1),
+    Heure = round(sum(!is.na(hrmn) & hrmn != "") / n() * 100, 1),
+    Adresse = round(sum(!is.na(adr) & adr != "") / n() * 100, 1)
+  ) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Taux (%)")
+
+taux_renseignement %>%
+  mutate(
+    Résultat = ifelse(`Taux (%)` >= 90, "Ok", "À vérifier")
+  ) %>%
+  gt() %>%
+  tab_header(title = "Taux de renseignement des variables clés")
+```
+
+## Test 5.3 : Sexe des conducteurs renseigné
+
+Le sexe des conducteurs doit être majoritairement renseigné.
+```{r}
+#| label: test-5-3
+
+sexe_manquant <- usagers_velo %>%
+  filter(catu == 1, sexe == -1) %>%
+  nrow()
+
+total_conducteurs <- usagers_velo %>%
+  filter(catu == 1) %>%
+  nrow()
+
+pct_manquant <- round(sexe_manquant / total_conducteurs * 100, 1)
+
+resultat_5_3 <- ifelse(pct_manquant < 5, "Ok", "À vérifier")
+
+tibble(
+  Test = "Sexe non renseigné pour conducteurs",
+  Nombre = sexe_manquant,
+  `% du total` = pct_manquant,
+  Résultat = resultat_5_3
+) %>%
+  gt()
+```
+
+---
+
+# 6. Tests métier
+
+## Test 6.1 : Accidents mortels
+
+Vérification de la cohérence des accidents avec tués.
+```{r}
+#| label: test-6-1
+
+accidents_avec_tue <- usagers_velo %>%
+  filter(grav == 2) %>%
+  pull(Num_Acc) %>%
+  unique()
+
+n_accidents_tues <- length(accidents_avec_tue)
+n_tues <- usagers_velo %>% filter(grav == 2) %>% nrow()
+
+tibble(
+  Métrique = c("Accidents avec au moins 1 tué", "Nombre total de tués"),
+  Valeur = c(n_accidents_tues, n_tues)
+) %>%
+  gt() %>%
+  tab_header(title = "Accidents mortels")
+```
+
+
+
+## Test 6.2 : Passagers sur bons véhicules
+
+Les passagers (catu = 2) ne peuvent être que sur certains types de véhicules.
+```{r}
+#| label: test-6-2
+
+passagers_bizarres <- usagers_velo %>%
+  filter(catu == 2) %>%
+  inner_join(vehicules_velo, by = c("Num_Acc", "num_veh")) %>%
+  filter(!catv %in% c(1, 7, 80))
+
+resultat_6_2 <- ifelse(nrow(passagers_bizarres) <= 2, "Ok", "À vérifier")
+
+tibble(
+  Test = "Passagers sur véhicules inhabituels",
+  Nombre = nrow(passagers_bizarres),
+  Résultat = resultat_6_2
+) %>%
+  gt()
+
+if (nrow(passagers_bizarres) > 0) {
+  passagers_bizarres %>%
+    count(catv) %>%
+    gt() %>%
+    tab_header(title = "Type de véhicules concernés")
+}
+```
+
+---
+
+# Résumé global
+```{r}
+#| label: resume
+#| echo: false
+
+tibble(
+  Section = c(
+    rep("1. Structure", 4),
+    rep("2. Configurations", 5),
+    rep("3. Temporel", 4),
+    rep("4. Géographique", 2),
+    rep("5. Complétude", 3),
+    rep("6. Métier", 2)
+  ),
+  `#` = c(
+    paste0("1.", 1:4),
+    paste0("2.", 1:5),
+    paste0("3.", 1:4),
+    paste0("4.", 1:2),
+    paste0("5.", 1:3),
+    paste0("6.", 1:2)
+  ),
+  Test = c(
+    "Cyclistes >= Vélos",
+    "Pas d'accident sans vélo",
+    "Pas de vélo sans conducteur",
+    "Pas de doublons",
+    "Configuration Vélo seul cohérente",
+    "Piétons dans accidents piétons",
+    "Piétons absents de vehicules",
+    "Somme configurations = total",
+    "n_total cohérent",
+    "Années 2005-2024",
+    "Mois 1-12",
+    "Format heure HH:MM",
+    "Âges 0-120",
+    "GPS dans limites Nice",
+    "GPS uniquement >= 2019",
+    "Gravité renseignée",
+    "Taux renseignement > 90%",
+    "Sexe conducteurs renseigné",
+    "Accidents mortels",
+    "Passagers sur bons véhicules"
+  ),
+  Résultat = c(
+    resultat_1_1, resultat_1_2, resultat_1_3, resultat_1_4,
+    resultat_2_1, resultat_2_2, resultat_2_3, resultat_2_4, resultat_2_5,
+    resultat_3_1, resultat_3_2, resultat_3_3, resultat_3_4,
+    resultat_4_1, resultat_4_2,
+    "Ok", "Ok", resultat_5_3,
+    "Ok", resultat_6_2
+  )
+) %>%
+  gt(groupname_col = "Section") %>%
+  tab_header(title = "Résumé des tests de cohérence") %>%
+  tab_style(
+    style = cell_fill(color = "#f8d7da"),
+    locations = cells_body(columns = Résultat, rows = Résultat == "Problème")
+  ) %>%
+  tab_style(
+    style = cell_fill(color = "#fff3cd"),
+    locations = cells_body(columns = Résultat, rows = Résultat == "À vérifier")
+  ) %>%
+  tab_style(
+    style = cell_fill(color = "#d4edda"),
+    locations = cells_body(columns = Résultat, rows = Résultat == "Ok")
+  ) %>%
+  tab_style(
+    style = cell_fill(color = "#e7f3ff"),
+    locations = cells_body(columns = Résultat, rows = Résultat == "Voir détails")
+  )
+```

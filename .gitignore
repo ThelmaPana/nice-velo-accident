@@ -72,4 +72,7 @@ analysis/*_files/
 app/rsconnect/
 app/renv/
 
+# ======
 
+.DS_store
+draft*
