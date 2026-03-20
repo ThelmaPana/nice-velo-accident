@@ -1,0 +1,446 @@
+---
+title: "Analyse des accidents mortels à vélo à Nice"
+author: "Thelma Panaïotis"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: true
+    embed-resources: true
+    theme: cosmo
+lang: fr
+execute: 
+  cache: true
+  warning: false
+---
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+#| echo: false
+
+library(tidyverse)
+library(here)
+library(gt)
+
+# Chargement des données
+caract_velo <- readRDS(here("data", "03.caracteristiques_velo_clean.rds"))
+usagers_velo <- readRDS(here("data", "03.usagers_velo_clean.rds"))
+vehicules_velo <- readRDS(here("data", "03.vehicules_velo_clean.rds"))
+lieux_velo <- readRDS(here("data", "03.lieux_velo_clean.rds"))
+config_accidents <- readRDS(here("data", "03.config_accidents.rds"))
+
+# Palette
+col_navy <- "#0A3D62"
+col_teal <- "#00A896"
+```
+
+## Vue d'ensemble
+```{r}
+#| label: vue-ensemble
+
+accidents_mortels <- usagers_velo %>%
+  filter(grav == 2) %>%
+  pull(Num_Acc) %>%
+  unique()
+
+n_accidents_mortels <- length(accidents_mortels)
+n_tues <- usagers_velo %>% filter(grav == 2) %>% nrow()
+```
+
+Entre 2005 et 2024, **`r n_accidents_mortels` accidents mortels** impliquant un vélo ont été enregistrés à Nice, causant **`r n_tues` décès de cyclistes**.
+
+## Liste des accidents mortels
+
+````{r}
+#| label: liste-accidents
+
+usagers_velo %>%
+  filter(grav == 2) %>%
+  left_join(caract_velo %>% select(Num_Acc, an, mois, jour, hrmn, adr), by = "Num_Acc") %>%
+  left_join(config_accidents %>% select(Num_Acc, configuration), by = "Num_Acc") %>%
+  mutate(
+    date = paste(jour, mois, an, sep = "/"),
+    age = an - an_nais,
+    adr = iconv(adr, from = "latin1", to = "UTF-8"),  # ← AJOUTER cette ligne
+    adr = ifelse(is.na(adr), "", adr)  # Remplacer NA par chaîne vide si conversion échoue
+  ) %>%
+  select(Num_Acc, date, hrmn, adr, configuration, sexe_label, age) %>%
+  arrange(desc(Num_Acc)) %>%
+  gt() %>%
+  tab_header(title = "Accidents mortels à vélo à Nice (2005-2024)") %>%
+  cols_label(
+    Num_Acc = "N° Accident",
+    date = "Date",
+    hrmn = "Heure",
+    adr = "Adresse",
+    configuration = "Configuration",
+    sexe_label = "Sexe",
+    age = "Âge"
+  )
+````
+
+
+## Caractéristiques des accidents mortels
+
+### Répartition par configuration
+```{r}
+#| label: config-mortels
+
+usagers_velo %>%
+  filter(grav == 2) %>%
+  left_join(config_accidents %>% select(Num_Acc, configuration), by = "Num_Acc") %>%
+  count(configuration, sort = TRUE) %>%
+  mutate(configuration = fct_reorder(configuration, n)) %>%
+  ggplot(aes(x = configuration, y = n)) +
+  geom_col(fill = col_navy, alpha = 0.8) +
+  coord_flip() +
+  labs(
+    title = "Accidents mortels par configuration",
+    x = NULL,
+    y = "Nombre de décès"
+  ) +
+  theme_minimal()
+```
+
+### Évolution temporelle
+```{r}
+#| label: evolution-mortels
+
+usagers_velo %>%
+  filter(grav == 2) %>%
+  left_join(caract_velo %>% select(Num_Acc, an), by = "Num_Acc") %>%
+  count(an) %>%
+  ggplot(aes(x = an, y = n)) +
+  geom_col(fill = col_teal, alpha = 0.8) +
+  labs(
+    title = "Nombre de décès par année",
+    x = NULL,
+    y = "Nombre de décès"
+  ) +
+  theme_minimal()
+```
+
+### Profil des victimes
+```{r}
+#| label: profil-victimes
+
+library(patchwork)
+
+# Sexe
+p_sexe <- usagers_velo %>%
+  filter(grav == 2) %>%
+  count(sexe_label) %>%
+  ggplot(aes(x = sexe_label, y = n)) +
+  geom_col(fill = col_navy, alpha = 0.8) +
+  labs(title = "Sexe", x = NULL, y = "Nombre") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 11))
+
+# Âge
+p_age <- usagers_velo %>%
+  filter(grav == 2, !is.na(an_nais)) %>%
+  left_join(caract_velo %>% select(Num_Acc, an), by = "Num_Acc") %>%
+  mutate(age = an - an_nais) %>%
+  filter(age >= 0, age <= 100) %>%
+  ggplot(aes(x = age)) +
+  geom_histogram(binwidth = 10, fill = col_teal, alpha = 0.8, color = "white") +
+  labs(title = "Âge", x = "Âge", y = "Nombre") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 11))
+
+p_sexe + p_age
+```
+
+## Circonstances
+
+### Conditions de luminosité
+```{r}
+#| label: luminosite-mortels
+
+usagers_velo %>%
+  filter(grav == 2) %>%
+  left_join(caract_velo %>% select(Num_Acc, lum_label), by = "Num_Acc") %>%
+  count(lum_label) %>%
+  mutate(lum_label = fct_reorder(lum_label, n, .desc = TRUE)) %>%
+  ggplot(aes(x = lum_label, y = n)) +
+  geom_col(fill = col_navy, alpha = 0.8) +
+  coord_flip() +
+  labs(
+    title = "Conditions de luminosité lors des accidents mortels",
+    x = NULL,
+    y = "Nombre de décès"
+  ) +
+  theme_minimal()
+```
+
+### Répartition horaire
+```{r}
+#| label: heure-mortels
+
+usagers_velo %>%
+  filter(grav == 2) %>%
+  left_join(caract_velo %>% select(Num_Acc, hrmn), by = "Num_Acc") %>%
+  filter(!is.na(hrmn), str_detect(hrmn, "^\\d{2}:\\d{2}$")) %>%
+  mutate(heure = as.integer(substr(hrmn, 1, 2))) %>%
+  count(heure) %>%
+  ggplot(aes(x = heure, y = n)) +
+  geom_col(fill = col_teal, alpha = 0.8) +
+  scale_x_continuous(breaks = seq(0, 23, 2)) +
+  labs(
+    title = "Accidents mortels par heure de la journée",
+    x = "Heure",
+    y = "Nombre de décès"
+  ) +
+  theme_minimal()
+```
+
+
+## Focus : Accidents mortels "vélo seul"
+
+Sur les 14 accidents mortels de cyclistes à Nice entre 2005 et 2024, **5 sont des accidents "vélo seul"** (sans collision avec un autre véhicule ou un piéton). Ces accidents représentent **36% des décès** et méritent une attention particulière.
+
+### Liste des accidents
+```{r}
+#| label: accidents-velo-seul-mortels
+
+library(DT)
+
+# Identifier les accidents "vélo seul" avec décès
+acc_velo_seul <- config_accidents %>%
+  filter(configuration == "Vélo seul") %>%
+  pull(Num_Acc)
+
+usagers_velo %>%
+  filter(Num_Acc %in% acc_velo_seul, grav == 2) %>%
+  left_join(caract_velo, by = "Num_Acc") %>%
+  left_join(lieux_velo, by = "Num_Acc") %>%
+  mutate(
+    date = paste(jour, mois, an, sep = "/"),
+    age = an - an_nais,
+    adr = iconv(adr, from = "latin1", to = "UTF-8"),
+    adr = ifelse(is.na(adr), "", adr)
+  ) %>%
+  select(
+    Num_Acc, date, hrmn, adr,
+    sexe_label, age,
+    lum_label, atm_label,
+    catr, vosp, surf, infra
+  ) %>%
+  arrange(desc(Num_Acc)) %>%
+  datatable(
+    caption = "Accidents mortels 'vélo seul' à Nice (2005-2024)",
+    colnames = c(
+      "N° Accident", "Date", "Heure", "Adresse",
+      "Sexe", "Âge",
+      "Luminosité", "Météo",
+      "Type route", "Voie réservée", "Surface", "Infrastructure"
+    ),
+    options = list(
+      pageLength = 10,
+      scrollX = TRUE
+    )
+  )
+```
+
+### Circonstances détaillées
+```{r}
+#| label: circonstances-velo-seul
+
+# Préparer les données pour analyse
+accidents_velo_seul_details <- usagers_velo %>%
+  filter(Num_Acc %in% acc_velo_seul, grav == 2) %>%
+  left_join(caract_velo, by = "Num_Acc") %>%
+  left_join(lieux_velo, by = "Num_Acc") %>%
+  left_join(vehicules_velo, by = c("Num_Acc", "num_veh")) %>%
+  mutate(age = an - an_nais)
+```
+
+#### Profil des victimes
+```{r}
+#| label: profil-velo-seul
+
+library(patchwork)
+
+# Sexe
+p1 <- accidents_velo_seul_details %>%
+  count(sexe_label) %>%
+  ggplot(aes(x = sexe_label, y = n)) +
+  geom_col(fill = col_navy, alpha = 0.8) +
+  labs(title = "Sexe", x = NULL, y = "Nombre") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 11))
+
+# Âge
+p2 <- accidents_velo_seul_details %>%
+  ggplot(aes(x = age)) +
+  geom_histogram(binwidth = 10, fill = col_teal, alpha = 0.8, color = "white") +
+  labs(title = "Âge", x = "Âge", y = "Nombre") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 11))
+
+p1 + p2
+```
+
+#### Conditions d'éclairage et météo
+```{r}
+#| label: conditions-velo-seul
+
+library(patchwork)
+
+# Luminosité
+p1 <- accidents_velo_seul_details %>%
+  count(lum_label) %>%
+  mutate(lum_label = fct_reorder(lum_label, n, .desc = TRUE)) %>%
+  ggplot(aes(x = lum_label, y = n)) +
+  geom_col(fill = col_navy, alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Luminosité", x = NULL, y = "Nombre") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 11))
+
+# Météo
+p2 <- accidents_velo_seul_details %>%
+  count(atm_label) %>%
+  mutate(atm_label = fct_reorder(atm_label, n, .desc = TRUE)) %>%
+  ggplot(aes(x = atm_label, y = n)) +
+  geom_col(fill = col_teal, alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Conditions atmosphériques", x = NULL, y = "Nombre") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 11))
+
+p1 + p2
+```
+
+#### Infrastructure et type de voie
+```{r}
+#| label: infrastructure-velo-seul
+
+# Catégorie de route
+accidents_velo_seul_details %>%
+  mutate(
+    catr_label = case_when(
+      catr == 1 ~ "Autoroute",
+      catr == 2 ~ "Route nationale",
+      catr == 3 ~ "Route départementale",
+      catr == 4 ~ "Voie communale",
+      catr == 5 ~ "Hors réseau public",
+      catr == 6 ~ "Parking",
+      catr == 7 ~ "Métropole urbaine",
+      catr == 9 ~ "Autre",
+      TRUE ~ "Non renseigné"
+    )
+  ) %>%
+  count(catr_label) %>%
+  mutate(catr_label = fct_reorder(catr_label, n, .desc = TRUE)) %>%
+  ggplot(aes(x = catr_label, y = n)) +
+  geom_col(fill = col_navy, alpha = 0.8) +
+  coord_flip() +
+  labs(
+    title = "Type de voie",
+    x = NULL,
+    y = "Nombre"
+  ) +
+  theme_minimal()
+```
+```{r}
+#| label: infrastructure-details
+
+# Voie réservée et surface
+accidents_velo_seul_details %>%
+  mutate(
+    vosp_label = case_when(
+      vosp == 0 | is.na(vosp) ~ "Pas de voie réservée",
+      vosp == 1 ~ "Piste cyclable",
+      vosp == 2 ~ "Bande cyclable",
+      vosp == 3 ~ "Voie réservée",
+      TRUE ~ "Non renseigné"
+    ),
+    surf_label = case_when(
+      surf == 1 ~ "Normale",
+      surf == 2 ~ "Mouillée",
+      surf == 3 ~ "Flaques",
+      surf == 4 ~ "Inondée",
+      surf == 5 ~ "Enneigée",
+      surf == 6 ~ "Boue",
+      surf == 7 ~ "Verglacée",
+      surf == 8 ~ "Corps gras",
+      surf == 9 ~ "Autre",
+      TRUE ~ "Non renseigné"
+    )
+  ) %>%
+  select(Num_Acc, vosp_label, surf_label) %>%
+  gt() %>%
+  tab_header(title = "Infrastructure et surface") %>%
+  cols_label(
+    Num_Acc = "N° Accident",
+    vosp_label = "Voie réservée",
+    surf_label = "État surface"
+  )
+```
+
+#### Obstacle heurté
+```{r}
+#| label: obstacle-velo-seul
+
+accidents_velo_seul_details %>%
+  mutate(
+    obs_label = case_when(
+      obs == 0 | is.na(obs) ~ "Sans objet",
+      obs == 1 ~ "Véhicule en stationnement",
+      obs == 2 ~ "Arbre",
+      obs == 3 ~ "Glissière métallique",
+      obs == 4 ~ "Glissière béton",
+      obs == 5 ~ "Autre glissière",
+      obs == 6 ~ "Bâtiment/mur/pile",
+      obs == 7 ~ "Signalisation",
+      obs == 8 ~ "Poteau",
+      obs == 9 ~ "Mobilier urbain",
+      obs == 10 ~ "Parapet",
+      obs == 11 ~ "Ilot/refuge/borne",
+      obs == 12 ~ "Bordure trottoir",
+      obs == 13 ~ "Fossé/talus",
+      obs == 14 ~ "Autre obstacle chaussée",
+      obs == 15 ~ "Autre obstacle trottoir",
+      obs == 16 ~ "Sortie chaussée sans obstacle",
+      obs == 17 ~ "Buse/aqueduc",
+      TRUE ~ "Non renseigné"
+    )
+  ) %>%
+  count(obs_label) %>%
+  mutate(obs_label = fct_reorder(obs_label, n, .desc = TRUE)) %>%
+  ggplot(aes(x = obs_label, y = n)) +
+  geom_col(fill = col_teal, alpha = 0.8) +
+  coord_flip() +
+  labs(
+    title = "Obstacle fixe heurté",
+    x = NULL,
+    y = "Nombre"
+  ) +
+  theme_minimal()
+```
+
+### Recherches presse complémentaires
+
+Les circonstances précises de ces accidents seront complétées par des recherches dans la presse locale (Nice-Matin, France 3 Côte d'Azur) en utilisant les dates et adresses identifiées ci-dessus.
+
+**Fichier de données :** `data/accidents_mortels_presse.csv`
+
+| Num_Acc | source | date_article | url | circonstances | notes |
+|---------|--------|--------------|-----|---------------|-------|
+| À compléter | | | | | |
+
+::: {.callout-warning}
+## Hypothèses à investiguer
+
+Les accidents "vélo seul" peuvent résulter de :
+
+- **Problèmes d'infrastructure** : nid de poule, rail de tram, bordure, obstacle
+- **Perte de contrôle** : descente, virage serré, vitesse excessive
+- **Collision avec élément fixe** : poteau, arbre, mobilier urbain
+- **Malaise médical** : arrêt cardiaque, malaise
+
+La documentation presse permettra de distinguer ces différentes causes et d'identifier les responsabilités (infrastructure défaillante vs comportement).
+:::
+
