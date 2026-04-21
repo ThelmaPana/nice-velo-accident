@@ -24,6 +24,8 @@ lieux            <- readRDS(here("data", "02.lieux.rds"))
 vehicules        <- readRDS(here("data", "02.vehicules.rds"))
 usagers          <- readRDS(here("data", "02.usagers.rds"))
 
+communes <- read_csv(here("data-raw", "communes.csv"), show_col_types = FALSE)
+
 
 ## Labels des variables ----
 #--------------------------------------------------------------------------#
@@ -96,7 +98,10 @@ caracteristiques <- caracteristiques %>%
     lum = as.integer(lum),
     atm = as.integer(atm),
     col = as.integer(col)
-  )
+  ) %>%
+  left_join(communes, by = c("com" = "code_insee")) %>%
+  rename(commune = nom_commune)
+
 
 ## Factorisation avec gestion des -1 (i.e. NA) ----
 #--------------------------------------------------------------------------#
@@ -266,4 +271,4 @@ saveRDS(caracteristiques, here("data", "03.caracteristiques_clean.rds"))
 saveRDS(usagers,          here("data", "03.usagers_clean.rds"))
 saveRDS(vehicules,        here("data", "03.vehicules_clean.rds"))
 
-cat("\n✓ Données nettoyées exportées dans /data/\n")
+cat("Données nettoyées exportées dans /data/\n")

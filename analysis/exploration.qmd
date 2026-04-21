@@ -1,5 +1,5 @@
 ---
-title: "Accidents à vélo à Nice"
+title: "Accidents à vélo — Métropole Nice Côte d'Azur"
 subtitle: "Exploration des données BAAC"
 author: "Thelma Panaïotis"
 date: today
@@ -36,9 +36,9 @@ col_muted <- "#5A8AAD"
 
 # Palette gravité (ColorBrewer RdYlGn inversé)
 grav_cols <- c(
-  "Indemne" = "#1a9850", 
-  "Blessé léger" = "#91cf60", 
-  "Blessé hospitalisé" = "#fc8d59", 
+  "Indemne" = "#1a9850",
+  "Blessé léger" = "#91cf60",
+  "Blessé hospitalisé" = "#fc8d59",
   "Tué" = "#d73027"
 )
 
@@ -66,7 +66,7 @@ vehicules <-        readRDS(here("data", "03.vehicules_clean.rds"))
 
 Les données analysées proviennent de la **Base de données des Accidents Corporels de la Circulation (BAAC)**, publiée par le Ministère de l'Intérieur sur [data.gouv.fr](https://www.data.gouv.fr/fr/datasets/bases-de-donnees-annuelles-des-accidents-corporels-de-la-circulation-routiere-annees-de-2005-a-2024/).
 
-**Périmètre :** Commune de Nice, période 2005–2024
+**Périmètre :** Métropole Nice Côte d'Azur (21 communes), période 2005–2024
 
 **Important :** La BAAC répertorie uniquement les **accidents corporels** (au moins une victime nécessitant des soins). Les accidents matériels ne sont pas inclus.
 
@@ -104,14 +104,14 @@ annee_fin <- max(caracteristiques$an)
 ::: {style="background-color: #0A3D62; color: white; padding: 2rem; border-radius: 8px; text-align: center; height: 100%;"}
 <div style="font-size: 3.5rem; font-weight: bold; margin-bottom: 0.5rem;">`r format(n_accidents_velo, big.mark = " ")`</div>
 <div style="font-size: 1.1rem;">accidents impliquant un vélo</div>
-<div style="font-size: 0.9rem; margin-top: 1rem; opacity: 0.9;">2005–2024 • Nice</div>
+<div style="font-size: 0.9rem; margin-top: 1rem; opacity: 0.9;">2005–2024 • Métropole Nice Côte d'Azur</div>
 :::
 :::
 
 ::: {.g-col-6}
 ::: {style="background-color: #00A896; color: white; padding: 2rem; border-radius: 8px; text-align: center; height: 100%;"}
 <div style="font-size: 3.5rem; font-weight: bold; margin-bottom: 0.5rem;">`r pct_velo`%</div>
-<div style="font-size: 1.1rem;">des accidents corporels à Nice</div>
+<div style="font-size: 1.1rem;">des accidents corporels de la métropole</div>
 <div style="font-size: 0.9rem; margin-top: 1rem; opacity: 0.9;">Sur `r format(n_accidents_total, big.mark = " ")` accidents au total</div>
 :::
 :::
@@ -163,9 +163,9 @@ evolution %>%
   geom_point(size = 2) +
   scale_colour_manual(values = c("Tous accidents" = col_navy, "Accidents vélo" = col_teal)) +
   labs(
-    title = "Accidents corporels à Nice (2005–2024)",
-    x = NULL, 
-    y = "Nombre d'accidents", 
+    title = "Accidents corporels — Métropole Nice Côte d'Azur (2005–2024)",
+    x = NULL,
+    y = "Nombre d'accidents",
     colour = NULL
   ) +
   theme(legend.position = "bottom")
@@ -179,7 +179,7 @@ ggplot(evolution, aes(x = an, y = pct)) +
   geom_col(fill = col_teal, alpha = 0.8) +
   labs(
     title = "Part des accidents impliquant un vélo",
-    x = NULL, 
+    x = NULL,
     y = "%"
   )
 ```
@@ -187,9 +187,118 @@ ggplot(evolution, aes(x = an, y = pct)) +
 ::: {.callout-note}
 ## Interprétation
 
-Le nombre total d'accidents corporels à Nice suit une **tendance à la baisse** sur la période, passant de plus de 1600 accidents par an en 2005 à environ 170 en 2024, soit une réduction d'un **facteur 10**. Les accidents impliquant des vélos suivent cette même tendance à la baisse, mais leur **proportion relative reste stable** autour de **3-4%** du total.
+Les accidents impliquant des vélos suivent la tendance générale à la baisse, mais leur **proportion relative reste stable** sur la période.
 
 :::
+
+---
+
+## Par commune
+
+### Nombre d'accidents vélo par commune
+```{r}
+#| label: accidents-par-commune
+#| code-summary: "Code : Accidents vélo par commune"
+
+caract_velo %>%
+  count(commune, sort = TRUE) %>%
+  mutate(commune = fct_reorder(commune, n)) %>%
+  ggplot(aes(x = n, y = commune)) +
+  geom_col(fill = col_navy, alpha = 0.8) +
+  labs(
+    title = "Accidents vélo par commune (2005–2024)",
+    x = "Nombre d'accidents",
+    y = NULL
+  )
+```
+
+### Mini-synthèse par commune
+```{r}
+#| label: synthese-commune
+#| code-summary: "Code : Synthèse accidents, gravité et évolution par commune"
+
+# Table de synthèse : accidents, tués, blessés hospitalisés, blessés légers
+synthese_commune <- caract_velo %>%
+  left_join(
+    usagers_velo %>%
+      group_by(Num_Acc) %>%
+      summarise(
+        n_tues       = sum(grav == 2, na.rm = TRUE),
+        n_hosp       = sum(grav == 3, na.rm = TRUE),
+        n_legers     = sum(grav == 4, na.rm = TRUE),
+        .groups = "drop"
+      ),
+    by = "Num_Acc"
+  ) %>%
+  group_by(commune) %>%
+  summarise(
+    n_accidents  = n(),
+    n_tues       = sum(n_tues, na.rm = TRUE),
+    n_hosp       = sum(n_hosp, na.rm = TRUE),
+    n_legers     = sum(n_legers, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_accidents))
+
+synthese_commune %>%
+  rename(
+    Commune              = commune,
+    Accidents            = n_accidents,
+    Tués                 = n_tues,
+    `Blessés hospitalisés` = n_hosp,
+    `Blessés légers`     = n_legers
+  ) %>%
+  knitr::kable()
+```
+
+```{r}
+#| label: gravite-commune
+#| code-summary: "Code : Gravité par commune"
+#| fig-height: 7
+
+# Ordre des communes par nombre d'accidents décroissant
+ordre_communes <- caract_velo %>%
+  count(commune, sort = TRUE) %>%
+  pull(commune)
+
+usagers_velo %>%
+  left_join(caract_velo %>% select(Num_Acc, commune), by = "Num_Acc") %>%
+  filter(grav != -1) %>%
+  count(commune, grav_label, .drop = FALSE) %>%
+  mutate(commune = factor(commune, levels = rev(ordre_communes))) %>%
+  ggplot(aes(x = commune, y = n, fill = grav_label)) +
+  geom_col() +
+  scale_fill_manual(values = grav_cols, drop = FALSE) +
+  coord_flip() +
+  labs(
+    title = "Gravité des accidents vélo par commune",
+    y = "Nombre d’accidents",
+    fill = "Gravité"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: evolution-commune
+#| code-summary: "Code : Évolution annuelle par commune"
+#| fig-height: 10
+
+caract_velo %>%
+  count(an, commune) %>%
+  mutate(commune = factor(commune, levels = ordre_communes)) %>%
+  ggplot(aes(x = an, y = n)) +
+  geom_line(colour = col_navy, linewidth = 0.8) +
+  geom_point(colour = col_navy, size = 1.5) +
+  facet_wrap(~commune, scales = "free_y", ncol = 3) +
+  labs(
+    title = "Évolution annuelle des accidents vélo par commune",
+    x = NULL,
+    y = "Nombre d'accidents"
+  ) +
+  theme(strip.text = element_text(size = 9))
+```
+
+---
 
 ## Gravité des accidents
 
@@ -218,7 +327,7 @@ usagers_velo %>%
   coord_flip() +
   labs(
     title = "Gravité des usagers impliqués dans des accidents vélo",
-    x = NULL, 
+    x = NULL,
     y = "Nombre d'usagers"
   )
 ```
@@ -239,8 +348,8 @@ usagers_velo %>%
   facet_wrap(~grav_label, scales = "free_y") +
   labs(
     title = "Évolution de la gravité par année",
-    x = NULL, 
-    y = "Nombre d'usagers", 
+    x = NULL,
+    y = "Nombre d'usagers",
     fill = NULL
   ) +
   theme(legend.position = "bottom")
@@ -249,7 +358,7 @@ usagers_velo %>%
 ::: {.callout-warning}
 ## Rupture méthodologique 2018
 
-Les données sur les **blessés hospitalisés** ont changé de méthodologie de saisie en 2018 et cet indicateur n'est plus labellisé depuis 2019. Les comparaisons avant/après 2018 pour cette catégorie doivent être interprétées avec prudence. 
+Les données sur les **blessés hospitalisés** ont changé de méthodologie de saisie en 2018 et cet indicateur n'est plus labellisé depuis 2019. Les comparaisons avant/après 2018 pour cette catégorie doivent être interprétées avec prudence.
 
 Seul le nombre de **tués** reste un indicateur labellisé et fiable sur toute la période.
 :::
@@ -270,7 +379,7 @@ p_sexe <- usagers_velo %>%
   ggplot(aes(x = sexe_label, y = n, fill = sexe_label)) +
   geom_col(show.legend = FALSE) +
   scale_fill_manual(
-    values = c("Homme" = col_navy, "Femme" = col_teal, 
+    values = c("Homme" = col_navy, "Femme" = col_teal,
                "Non renseigné" = col_muted, "Autre" = col_orange),
     drop = FALSE
   ) +
@@ -318,7 +427,7 @@ caract_velo %>%
   scale_x_continuous(breaks = 1:12, labels = mois_labels) +
   labs(
     title = "Accidents vélo par mois (2005–2024)",
-    x = NULL, 
+    x = NULL,
     y = "Nombre d'accidents"
   )
 ```
@@ -340,7 +449,7 @@ caract_velo %>%
   scale_x_continuous(breaks = 1:7, labels = jour_labels) +
   labs(
     title = "Accidents vélo par jour de la semaine",
-    x = NULL, 
+    x = NULL,
     y = "Nombre d'accidents"
   )
 ```
@@ -360,7 +469,7 @@ caract_velo %>%
   scale_x_continuous(breaks = seq(0, 23, 2)) +
   labs(
     title = "Accidents vélo par heure de la journée",
-    x = "Heure", 
+    x = "Heure",
     y = "Nombre d'accidents"
   )
 ```
@@ -402,7 +511,9 @@ caract_velo %>%
 ::: {.callout-note}
 ## Interprétation
 
-Les accidents sont **moins fréquents en hiver** (décembre-mars), lié à une moindre pratique du vélo par mauvais temps. Les accidents surviennent **plus souvent en semaine** que le week-end, reflétant l'importance des déplacements domicile-travail.
+Les accidents sont **moins fréquents en hiver** (décembre-mars), lié à une moindre pratique du vélo par mauvais temps.
+
+Les accidents surviennent **plus souvent en semaine** que le week-end, reflétant l'importance des déplacements domicile-travail.
 
 **Deux pics nets** apparaissent aux **heures de pointe : 8-9h et 16-17h**, confirmant que les trajets vélotaf structurent l'accidentalité. La majorité des accidents se produisent **de jour**.
 
@@ -415,37 +526,68 @@ Les pics horaires restent identiques quelle que soit la saison : les **déplacem
 ### Cartographie des accidents (2019-2024)
 
 Seules les années 2019-2024 disposent de coordonnées GPS exploitables.
+
 ```{r}
 #| label: carte
 #| code-summary: "Code : Carte interactive des accidents géolocalisés"
 
+grav_max <- usagers_velo %>%
+  group_by(Num_Acc) %>%
+  summarise(grav_max = min(grav[grav > 0], na.rm = TRUE), .groups = "drop") %>%
+  mutate(grav_label_max = recode(as.character(grav_max),
+    "2" = "Tué",
+    "3" = "Blessé hospitalisé",
+    "4" = "Blessé léger",
+    "1" = "Indemne"
+  ))
 
 caract_velo_geo <- caract_velo %>%
-  filter(!is.na(lat), !is.na(long), lat != 0, long != 0)
+  filter(!is.na(lat), !is.na(long), lat != 0, long != 0) %>%
+  left_join(grav_max, by = "Num_Acc") %>%
+  left_join(config_accidents %>% select(Num_Acc, configuration), by = "Num_Acc")
 
 cat("Accidents vélo géolocalisés :", nrow(caract_velo_geo), "sur", nrow(caract_velo), "\n")
 
 if (nrow(caract_velo_geo) > 0) {
   library(leaflet)
-  
+
+  pal <- colorFactor(
+    palette  = c("#d73027", "#fc8d59", "#91cf60", "#1a9850"),
+    levels   = c("Tué", "Blessé hospitalisé", "Blessé léger", "Indemne"),
+    na.color = "grey"
+  )
+
   leaflet(caract_velo_geo) %>%
     addTiles() %>%
     addCircleMarkers(
       lng = ~long,
       lat = ~lat,
       radius = 5,
-      color = col_navy,
-      stroke = FALSE,
-      fillOpacity = 0.6,
+      fillColor = ~pal(grav_label_max),
+      fillOpacity = 0.7,
+      stroke = TRUE,
+      color = "black",
+      weight = 1,
+      opacity = 0.8,
       popup = ~paste0(
-        "<b>Année :</b> ", an, "<br>",
+        "<b>Commune :</b> ", commune, "<br>",
         "<b>Date :</b> ", jour, "/", mois, "/", an, "<br>",
         "<b>Heure :</b> ", hrmn, "<br>",
+        "<b>Gravité :</b> ", grav_label_max, "<br>",
+        "<b>Configuration :</b> ", configuration, "<br>",
         "<b>Adresse :</b> ", adr
       )
+    ) %>%
+    addLegend(
+      position = "bottomright",
+      pal      = pal,
+      values   = ~grav_label_max,
+      title    = "Gravité (cycliste)",
+      opacity  = 0.7
     )
 }
 ```
+
 
 ### Lieux les plus accidentogènes
 ```{r}
@@ -455,13 +597,14 @@ if (nrow(caract_velo_geo) > 0) {
 
 caract_velo %>%
   filter(!is.na(adr), adr != "") %>%
-  count(adr, sort = TRUE) %>%
+  count(commune, adr, sort = TRUE) %>%
   head(15) %>%
-  mutate(adr = fct_reorder(adr, n)) %>%
-  ggplot(aes(x = n, y = adr)) +
+  mutate(label = paste0(adr, " (", commune, ")"),
+         label = fct_reorder(label, n)) %>%
+  ggplot(aes(x = n, y = label)) +
   geom_col(fill = col_teal, alpha = 0.8) +
   labs(
-    title = "15 lieux avec le plus d'accidents vélo (2005-2024)",
+    title = "15 lieux avec le plus d'accidents vélo",
     x = "Nombre d'accidents",
     y = NULL
   )
@@ -470,7 +613,7 @@ caract_velo %>%
 ::: {.callout-warning}
 ## Limite
 
-Les adresses sont au format BAAC brut (avec numéros de voirie et tronçons). Un nettoyage sera nécessaire pour regrouper les segments d'une même rue. Par exemple, les 46 occurrences de "ANGLAIS" correspondent toutes à la Promenade des Anglais. Cette harmonisation permettra d'identifier plus clairement les axes les plus accidentogènes.
+Les adresses sont au format BAAC brut (avec numéros de voirie et tronçons). Un nettoyage sera nécessaire pour regrouper les segments d'une même rue. Par exemple, les occurrences de "ANGLAIS" correspondent toutes à la Promenade des Anglais. Cette harmonisation permettra d'identifier plus clairement les axes les plus accidentogènes.
 :::
 
 ## Circonstances des accidents
@@ -513,7 +656,7 @@ caract_velo %>%
     x = "Heure",
     y = "Nombre d'accidents",
     fill = NULL
-  ) 
+  )
 ```
 
 ### Conditions atmosphériques
@@ -530,7 +673,7 @@ caract_velo %>%
   coord_flip() +
   labs(
     title = "Conditions atmosphériques lors des accidents vélo",
-    x = NULL, 
+    x = NULL,
     y = "Nombre d'accidents"
   )
 ```
@@ -549,7 +692,7 @@ caract_velo %>%
   coord_flip() +
   labs(
     title = "Type de collision",
-    x = NULL, 
+    x = NULL,
     y = "Nombre d'accidents"
   )
 ```
@@ -557,11 +700,11 @@ caract_velo %>%
 ::: {.callout-note}
 ## Interprétation
 
-L'écrasante majorité des accidents se produit **en plein jour**. Le croisement luminosité/heure confirme la cohérence des données : les accidents "de nuit" se produisent bien la nuit, les accidents "de jour" bien le jour. 
+L'écrasante majorité des accidents se produit **en plein jour**. Le croisement luminosité/heure confirme la cohérence des données : les accidents "de nuit" se produisent bien la nuit, les accidents "de jour" bien le jour.
 
 Un point notable : parmi les accidents nocturnes, la **quasi-totalité survient avec éclairage public allumé**. Les accidents sans éclairage ou avec éclairage en panne sont très rares. **L'éclairage public seul ne suffit donc pas** à protéger les cyclistes la nuit.
 
-Plus de **90% des accidents** surviennent par **conditions atmosphériques normales**, reflétant soit une pratique réduite du vélo par mauvais temps, soit la fréquence des conditions normales à Nice.
+Plus de **90% des accidents** surviennent par **conditions atmosphériques normales**, reflétant soit une pratique réduite du vélo par mauvais temps, soit la fréquence des conditions normales sur la métropole.
 
 Les **collisions par le côté dominent** largement, soulevant des questions sur les angles morts et la visibilité des cyclistes.
 :::
@@ -575,7 +718,7 @@ Les **collisions par le côté dominent** largement, soulevant des questions sur
 
 
 config_accidents %>%
-  count(configuration, sort = TRUE) %>% 
+  count(configuration, sort = TRUE) %>%
   mutate(configuration = fct_reorder(configuration, n)) %>%
   ggplot(aes(x = configuration, y = n)) +
   geom_col(fill = col_navy, alpha = 0.8) +
@@ -609,7 +752,7 @@ config_accidents %>%
   labs(
     title = "Évolution des configurations d'accidents par année",
     x = NULL,
-    y = "Nombre d'accidents", 
+    y = "Nombre d'accidents",
     colour = NULL
   ) +
   facet_wrap(~configuration, scales = "free_y") +
@@ -653,18 +796,14 @@ usagers_velo %>%
 ::: {.callout-note}
 ## Interprétation
 
-Les **collisions vélo/voiture** représentent la **majorité écrasante des accidents** (plus de 60%), suivies des accidents **"vélo seul"** qui correspondent probablement à des chutes liées à l'infrastructure. Toutes les configurations suivent la tendance générale à la baisse, sans changement notable de répartition relative.
-
-En termes de gravité, les cyclistes sortent plus souvent indemnes lors de collisions avec d'autres vélos, des 2RM ou des piétons. La **proportion de cyclistes tués est nettement plus élevée** dans les accidents impliquant des **poids lourds**.
-
-Un résultat surprenant apparaît : la **proportion de cyclistes décédés est plus élevée** dans les accidents **"vélo seul"** que dans les collisions avec voitures ou 2RM. Cela suggère des **chutes à haute vitesse** ou des **problèmes d'infrastructure graves** (obstacles, dénivelé, revêtement dégradé). Ces accidents "vélo seul" mériteraient une analyse plus fine pour distinguer les chutes liées à l'infrastructure des autres causes.
+Les **collisions vélo/voiture** représentent la **majorité écrasante des accidents** (plus de 60%), suivies des accidents **"vélo seul"** qui correspondent probablement à des chutes liées à l'infrastructure.
 :::
 
 ## Vélos et piétons : qui est dangereux pour qui ?
 
 Un argument fréquent contre les aménagements cyclables est que les vélos représenteraient un danger pour les piétons. Qu'en disent les données ?
 
-### Accidents impliquant des piétons à Nice
+### Accidents impliquant des piétons dans la métropole
 ```{r}
 #| label: pietons-tous-accidents
 #| code-summary: "Code : Répartition des accidents avec piétons selon le type de véhicule"
@@ -700,7 +839,7 @@ vehicules %>%
   coord_flip() +
   labs(
     title = "Véhicules impliqués dans les accidents avec piétons (2005-2024)",
-    subtitle = "Tous accidents à Nice",
+    subtitle = "Métropole Nice Côte d'Azur",
     x = NULL,
     y = "Nombre de véhicules impliqués"
   )
@@ -755,7 +894,6 @@ vehicules_pietons <- vehicules %>%
       TRUE ~ "Autre"
     )
   ) %>%
-  # Garder un seul type de véhicule par accident (le plus "lourd")
   group_by(Num_Acc) %>%
   arrange(match(type_vehicule, c("Poids lourd/VU", "Voiture", "2 roues motorisé", "Vélo/VAE", "Autre"))) %>%
   slice(1) %>%
@@ -764,7 +902,7 @@ vehicules_pietons <- vehicules %>%
 
 # Gravité des piétons
 usagers %>%
-  filter(catu == 3, Num_Acc %in% acc_avec_pieton_tous) %>%  # piétons uniquement
+  filter(catu == 3, Num_Acc %in% acc_avec_pieton_tous) %>%
   left_join(vehicules_pietons, by = "Num_Acc", relationship = "many-to-one") %>%
   filter(grav != -1, type_vehicule %in% c("Vélo/VAE", "Voiture", "Poids lourd/VU", "2 roues motorisé")) %>%
   count(type_vehicule, grav_label, .drop = FALSE) %>%
@@ -788,7 +926,7 @@ usagers %>%
 ::: {.callout-note}
 ## Constat
 
-Sur la période 2005-2024 à Nice, les **véhicules motorisés** (voitures, poids lourds, 2-roues motorisés) représentent **l'écrasante majorité des accidents impliquant des piétons**. 
+Sur la période 2005-2024 dans la métropole, les **véhicules motorisés** (voitures, poids lourds, 2-roues motorisés) représentent **l'écrasante majorité des accidents impliquant des piétons**.
 
 Les vélos/VAE ne représentent qu'une **faible part** des accidents avec piétons, et ces accidents sont généralement **moins graves** que ceux impliquant des véhicules motorisés.
 
@@ -801,7 +939,7 @@ Les vélos/VAE ne représentent qu'une **faible part** des accidents avec piéto
 ::: {.callout-tip icon=false}
 ## Ce que révèlent les données
 
-Entre 2005 et 2024, **548 accidents** impliquant un vélo ont été enregistrés à Nice, causant **14 décès** et **91 hospitalisations**. Ces chiffres révèlent :
+Entre 2005 et 2024, **`r n_accidents_velo` accidents** impliquant un vélo ont été enregistrés dans la métropole Nice Côte d'Azur, causant **`r n_tues` décès** et **`r n_hospitalises` hospitalisations**. Ces chiffres révèlent :
 
 - Une baisse générale des accidents, mais une **stagnation des accidents graves**
 - Un profil type : homme 15-55 ans, collision latérale avec une voiture en semaine aux heures de pointe
@@ -820,17 +958,17 @@ Les chiffres présentés ici **sous-estiment donc la réalité de l'accidentalit
 D'autres limites persistent : changement de méthodologie pour les blessés hospitalisés en 2018 (non comparable), pas de données sur le volume de déplacements (exposition au risque), sur le port du casque, ou sur le rôle précis de l'infrastructure. La géolocalisation n'est disponible qu'à partir de 2019.
 :::
 
-
 ::: {.callout-note icon=false}
 ## Et maintenant ?
 
-Ces données, malgré leurs limites, **permettent de contrer le cyclobashing par des faits chiffrés**. 
+Ces données, malgré leurs limites, **permettent de contrer le cyclobashing par des faits chiffrés**.
 
-Les prochaines étapes : 
+Les prochaines étapes :
 
-- créer un dashboard interactif, 
-- analyser l'infrastructure et géolocaliser les accidents (table `lieux`), 
-- croiser avec les données de compteurs vélo de Nice pour calculer un taux d'accident par kilomètre parcouru, 
+- créer un dashboard interactif,
+- analyser l'infrastructure et géolocaliser les accidents (table `lieux`),
+- croiser avec les données de compteurs vélo de Nice pour calculer un taux d'accident par kilomètre parcouru,
+- étudier les cas des cyclistes décédés dans des accidents sans tiers,
 - lancer un questionnaire citoyen pour quantifier la sous-déclaration des accidents,
 - utiliser ces analyses pour appuyer les demandes d'aménagements cyclables sécurisés.
 

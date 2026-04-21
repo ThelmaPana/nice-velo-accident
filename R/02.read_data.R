@@ -4,10 +4,6 @@
 # Date: 09/03/2026
 # Author: Thelma Panaïotis
 #
-# Paramètres prévus pour le futur package R :
-#   - code_commune : code INSEE 5 caractères (ex: "06088" pour Nice)
-#   - annees       : vecteur d'années (ex: 2005:2024)
-#
 # Deux formats coexistent dans les données BAAC :
 #   - Ancien format (<= 2018) : dep encodé ×10 (ex: 590=Nord, 60=Alpes-Maritimes),
 #                               com dans le dep, an 2 chiffres,
@@ -20,6 +16,10 @@
 #   - Fallback sur lecture du CSV brut si la ressource n'est pas indexée
 #     (cas de certaines années : 2005, 2010-2012, potentiellement d'autres)
 #
+# Modification 2026-04 : périmètre étendu à 21 communes (Nice + 20 voisines)
+#   - codes_insee lus depuis data-raw/communes.csv
+#   - Boucle sur chaque commune (com__exact), résultats agrégés par année
+#
 #--------------------------------------------------------------------------#
 
 library(tidyverse)
@@ -29,9 +29,9 @@ library(here)
 
 ## Configuration ----
 #--------------------------------------------------------------------------#
-# Paramètres futurs du package
-code_commune <- "06088"   # Code INSEE de Nice
-annees       <- 2005:2024
+communes    <- read_csv(here("data-raw", "communes.csv"), show_col_types = FALSE)
+codes_insee <- communes$code_insee   # vecteur de 21 codes ex. "06088"
+annees      <- 2005:2024
 
 base_url <- "https://tabular-api.data.gouv.fr/api/resources"
 
@@ -51,8 +51,8 @@ parse_commune_code <- function(code) {
   dep_int <- as.integer(substr(code, 1, 2))
   com_int <- as.integer(substr(code, 3, 5))
   list(
-    com_new  = code,                         # "06088" → API interprète comme entier 6088
-    dep_old  = as.integer(dep_int * 10),     # dep 06 → 60 (encodage ×10 ancien format)
+    com_new  = code,
+    dep_old  = as.integer(dep_int * 10),     # dep 06 -> 60
     com_old  = com_int                       # 88
   )
 }
@@ -80,7 +80,7 @@ fetch_paginated <- function(url) {
   bind_rows(all_data)
 }
 
-# Récupère les caractéristiques filtrées par commune (API Tabular)
+# Récupère les caractéristiques filtrées par une commune (API Tabular)
 fetch_caracteristiques_api <- function(resource_id, annee, codes) {
   filter_str <- if (annee >= 2019) {
     paste0("?com__exact=", codes$com_new, "&page_size=500")
@@ -104,9 +104,6 @@ fetch_by_num_acc_api <- function(resource_id, num_acc) {
 
 # --- Voie 2 : CSV brut (fallback) ---
 
-# Lit un CSV BAAC en détectant automatiquement le séparateur parmi , \t ;
-# (les fichiers BAAC historiques varient : virgule en 2005/2012, tabulation en 2009...)
-# Toutes les colonnes sont lues en character pour éviter les problèmes de typage
 read_baac_csv <- function(url) {
   for (delim in c(",", "\t", ";")) {
     df <- read_delim(
@@ -118,7 +115,7 @@ read_baac_csv <- function(url) {
   stop("Impossible de lire le CSV : séparateur non reconnu parmi , \\t ;")
 }
 
-# Récupère les caractéristiques filtrées par commune (CSV brut)
+# Récupère les caractéristiques filtrées par une commune (CSV brut)
 fetch_caracteristiques_csv <- function(url_csv, annee, codes) {
   df <- read_baac_csv(url_csv)
   if (annee >= 2019) {
@@ -139,13 +136,9 @@ fetch_by_num_acc_csv <- function(url_csv, num_acc) {
 
 # --- Normalisation ---
 
-# Normalise les caractéristiques pour homogénéiser les deux formats
-# Colonnes en sortie : Num_Acc, jour, mois, an, hrmn, lum, dep, com,
-#                      agg, int, atm, col, adr, lat, long
 normalize_caracteristiques <- function(df, annee) {
   df <- df %>% select(-any_of("__id"))
 
-  # Renommer Accident_Id en Num_Acc si nécessaire (2019+)
   if ("Accident_Id" %in% names(df) && !"Num_Acc" %in% names(df)) {
     df <- df %>% rename(Num_Acc = Accident_Id)
   }
@@ -156,24 +149,20 @@ normalize_caracteristiques <- function(df, annee) {
         an   = 2000L + as.integer(an),
         hrmn = sprintf("%04d", as.integer(hrmn)),
         hrmn = paste0(substr(hrmn, 1, 2), ":", substr(hrmn, 3, 4)),
-        dep  = as.integer(dep) %/% 10L,          # 60 -> 6, 590 -> 59
-        com  = sprintf("%02d%03d", dep, as.integer(com)),  # reconstitue "06088"
-        lat  = NA_real_,                          # Lambert non converti -> NA
+        dep  = as.integer(dep) %/% 10L,
+        com  = sprintf("%02d%03d", dep, as.integer(com)),
+        lat  = NA_real_,
         long = NA_real_
       ) %>%
       select(-any_of("gps"))
-
   } else {
     df <- df %>%
       mutate(
         an   = as.integer(an),
         dep  = as.integer(dep),
-        com  = sprintf("%05d", as.integer(com)),  # 6088 -> "06088"
-        # CSV BAAC >= 2019 utilise la virgule comme séparateur décimal (ex: "43,7119")
-        # On normalise en remplaçant la virgule par un point avant as.numeric()
+        com  = sprintf("%05d", as.integer(com)),
         lat  = as.numeric(gsub(",", ".", as.character(lat))),
         long = as.numeric(gsub(",", ".", as.character(long))),
-        # Bug API Tabular : hrmn HHMM entier parsé en date pour 2019-2023 -> NA
         hrmn = if_else(
           str_detect(coalesce(hrmn, ""), "^\\d{4}-\\d{2}-\\d{2}"),
           NA_character_,
@@ -187,20 +176,15 @@ normalize_caracteristiques <- function(df, annee) {
 
 clean_table <- function(df) {
   df <- df %>% select(-any_of("__id"))
-
-  # Renommer Accident_Id en Num_Acc si nécessaire
   if ("Accident_Id" %in% names(df) && !"Num_Acc" %in% names(df)) {
     df <- df %>% rename(Num_Acc = Accident_Id)
   }
-
   df
 }
 
 
 ## Téléchargement ----
 #--------------------------------------------------------------------------#
-codes <- parse_commune_code(code_commune)
-
 all_caract    <- list()
 all_lieux     <- list()
 all_vehicules <- list()
@@ -222,18 +206,29 @@ for (yr in annees) {
   url_vehicules <- cat_yr %>% filter(type == "vehicules")        %>% pull(url)
   url_usagers   <- cat_yr %>% filter(type == "usagers")          %>% pull(url)
 
-  # Caractéristiques : API Tabular en priorité, CSV en fallback
-  result <- tryCatch(
-    list(data = fetch_caracteristiques_api(rid_caract, yr, codes), via_csv = FALSE),
-    error = function(e) {
-      cat("  API Tabular indisponible, lecture du CSV brut\n")
-      list(data = fetch_caracteristiques_csv(url_caract, yr, codes), via_csv = TRUE)
-    }
-  )
-  caract  <- result$data
-  via_csv <- result$via_csv
+  # Boucle sur chaque commune, agrégation des caractéristiques
+  caract_yr <- list()
+  via_csv   <- FALSE
 
-  if (nrow(caract) == 0) { cat("  Aucun accident trouvé pour", code_commune, "\n"); next }
+  for (code in codes_insee) {
+    codes <- parse_commune_code(code)
+
+    result <- tryCatch(
+      list(data = fetch_caracteristiques_api(rid_caract, yr, codes), via_csv = FALSE),
+      error = function(e) {
+        list(data = fetch_caracteristiques_csv(url_caract, yr, codes), via_csv = TRUE)
+      }
+    )
+
+    if (nrow(result$data) > 0) {
+      caract_yr[[code]] <- result$data
+      via_csv <- result$via_csv
+    }
+  }
+
+  caract <- bind_rows(caract_yr)
+
+  if (nrow(caract) == 0) { cat("  Aucun accident trouvé\n"); next }
 
   caract  <- normalize_caracteristiques(caract, yr)
   num_acc <- caract$Num_Acc
@@ -252,34 +247,25 @@ for (yr in annees) {
     usagers   <- fetch_by_num_acc_api(rid_usagers,   num_acc) %>% clean_table()
   }
 
-  all_caract[[as.character(yr)]]    <- caract
-  all_lieux[[as.character(yr)]]     <- lieux
-  all_vehicules[[as.character(yr)]] <- vehicules
-  all_usagers[[as.character(yr)]]   <- usagers
+  all_caract[[yr]]    <- caract
+  all_lieux[[yr]]     <- lieux
+  all_vehicules[[yr]] <- vehicules
+  all_usagers[[yr]]   <- usagers
 }
 
 
-## Assemblage et sauvegarde ----
+## Assemblage et export ----
 #--------------------------------------------------------------------------#
-# bind_rows gère les colonnes qui diffèrent entre années
-# (ex : env1 absent en 2024, vma absent en 2016) -> colonnes manquantes remplies par NA
-
 caracteristiques <- bind_rows(all_caract)
 lieux            <- bind_rows(all_lieux)
 vehicules        <- bind_rows(all_vehicules)
 usagers          <- bind_rows(all_usagers)
+
+cat("\nTotal :", n_distinct(caracteristiques$Num_Acc), "accidents sur", length(annees), "années et", nrow(communes), "communes\n")
 
 saveRDS(caracteristiques, here("data", "02.caracteristiques.rds"))
 saveRDS(lieux,            here("data", "02.lieux.rds"))
 saveRDS(vehicules,        here("data", "02.vehicules.rds"))
 saveRDS(usagers,          here("data", "02.usagers.rds"))
 
-cat(
-  "\nSauvegardé dans data/ :",
-  "\n  caracteristiques.rds :", nrow(caracteristiques), "lignes",
-  "\n  lieux.rds            :", nrow(lieux), "lignes",
-  "\n  vehicules.rds        :", nrow(vehicules), "lignes",
-  "\n  usagers.rds          :", nrow(usagers), "lignes",
-  "\n"
-)
-
+cat("Données brutes exportées dans /data/\n")
