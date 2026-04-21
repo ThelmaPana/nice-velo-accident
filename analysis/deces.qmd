@@ -1,152 +1,234 @@
 ---
-title: "Analyse des accidents mortels à vélo à Nice"
+title: "Analyse des accidents mortels à vélo"
+subtitle: "Métropole Nice Côte d'Azur, 2005–2024"
 author: "Thelma Panaïotis"
 date: today
 format:
   html:
     toc: true
+    toc-depth: 3
     code-fold: true
     embed-resources: true
     theme: cosmo
 lang: fr
-execute: 
+execute:
   cache: true
   warning: false
 ---
+
 ```{r}
 #| label: setup
 #| message: false
 #| warning: false
 #| echo: false
+#| cache: false
 
 library(tidyverse)
 library(here)
 library(gt)
+library(leaflet)
+library(patchwork)
 
 # Chargement des données
-caract_velo <- readRDS(here("data", "03.caracteristiques_velo_clean.rds"))
-usagers_velo <- readRDS(here("data", "03.usagers_velo_clean.rds"))
-vehicules_velo <- readRDS(here("data", "03.vehicules_velo_clean.rds"))
-lieux_velo <- readRDS(here("data", "03.lieux_velo_clean.rds"))
+caract_velo      <- readRDS(here("data", "03.caracteristiques_velo_clean.rds"))
+usagers_velo     <- readRDS(here("data", "03.usagers_velo_clean.rds"))
+vehicules_velo   <- readRDS(here("data", "03.vehicules_velo_clean.rds"))
+lieux_velo       <- readRDS(here("data", "03.lieux_velo_clean.rds"))
 config_accidents <- readRDS(here("data", "03.config_accidents.rds"))
 
-# Palette
-col_navy <- "#0A3D62"
-col_teal <- "#00A896"
+# Périmètre géographique (dynamique)
+communes   <- read_csv(here("data-raw", "communes.csv"), show_col_types = FALSE)
+n_communes <- nrow(communes)
+perimetre  <- paste0(
+  n_communes, " communes de la Métropole Nice Côte d'Azur ",
+  "(", paste(sort(communes$nom_commune), collapse = ", "), ")"
+)
+
+# Palette (cohérence avec exploration.qmd)
+col_navy   <- "#0A3D62"
+col_teal   <- "#00A896"
+col_orange <- "#F17D52"
+col_muted  <- "#5A8AAD"
+
+theme_set(theme_minimal(base_size = 12))
 ```
 
-## Vue d'ensemble
+## Introduction
+
+**Périmètre :** `r perimetre`, période 2005–2024.
+
+::: {.callout-important}
+## Données d'identité
+
+La BAAC ne contient **aucun nom ni prénom** des victimes. Les informations d'identité
+proviennent exclusivement de sources externes (presse, archives). Les fiches
+individuelles en section 4 constituent un document de travail évolutif, alimenté
+au fil des recherches.
+:::
+
 ```{r}
 #| label: vue-ensemble
 
-accidents_mortels <- usagers_velo %>%
-  filter(grav == 2) %>%
-  pull(Num_Acc) %>%
-  unique()
+# Table de base : cyclistes décédés avec contexte complet
+deces <- usagers_velo |>
+  filter(grav == 2) |>
+  left_join(caract_velo, by = "Num_Acc") |>
+  left_join(
+    config_accidents |> select(Num_Acc, configuration, n_total),
+    by = "Num_Acc"
+  ) |>
+  left_join(lieux_velo, by = "Num_Acc") |>
+  left_join(communes, by = c("com" = "code_insee")) |>   # ← ajout
+  mutate(
+    age       = an - an_nais,
+    age       = if_else(age < 0 | age > 110, NA_real_, age),
+    adr       = iconv(adr, from = "latin1", to = "UTF-8"),
+    adr       = if_else(is.na(adr), "", adr),
+    velo_seul = configuration == "Vélo seul"
+  ) |> 
+  arrange(desc(an), desc(mois), desc(jour))
 
-n_accidents_mortels <- length(accidents_mortels)
-n_tues <- usagers_velo %>% filter(grav == 2) %>% nrow()
+n_accidents_mortels <- n_distinct(deces$Num_Acc)
+n_tues              <- nrow(deces)
+n_velo_seul         <- sum(deces$velo_seul, na.rm = TRUE)
 ```
 
-Entre 2005 et 2024, **`r n_accidents_mortels` accidents mortels** impliquant un vélo ont été enregistrés à Nice, causant **`r n_tues` décès de cyclistes**.
+Entre 2005 et 2024, **`r n_accidents_mortels` accidents mortels** impliquant un vélo
+ont été enregistrés sur les `r n_communes` communes de la Métropole Nice Côte d'Azur,
+causant **`r n_tues` décès de cyclistes**, dont **`r n_velo_seul` en accidents
+"vélo seul"** (sans tiers impliqué).
 
-## Liste des accidents mortels
+---
 
-````{r}
-#| label: liste-accidents
+# 1. Vue d'ensemble des accidents mortels
 
-usagers_velo %>%
-  filter(grav == 2) %>%
-  left_join(caract_velo %>% select(Num_Acc, an, mois, jour, hrmn, adr), by = "Num_Acc") %>%
-  left_join(config_accidents %>% select(Num_Acc, configuration), by = "Num_Acc") %>%
-  mutate(
-    date = paste(jour, mois, an, sep = "/"),
-    age = an - an_nais,
-    adr = iconv(adr, from = "latin1", to = "UTF-8"),  # ← AJOUTER cette ligne
-    adr = ifelse(is.na(adr), "", adr)  # Remplacer NA par chaîne vide si conversion échoue
-  ) %>%
-  select(Num_Acc, date, hrmn, adr, configuration, sexe_label, age) %>%
-  arrange(desc(Num_Acc)) %>%
-  gt() %>%
-  tab_header(title = "Accidents mortels à vélo à Nice (2005-2024)") %>%
+## Tableau récapitulatif
+
+```{r}
+#| label: tableau-recap
+
+deces |>
+  mutate(date = paste(jour, mois, an, sep = "/")) |>
+  select(Num_Acc, date, hrmn, nom_commune, adr, configuration, sexe_label, age) |>
+  arrange(Num_Acc) |>
+  gt() |>
+  tab_header(
+    title    = "Accidents mortels à vélo — Métropole Nice Côte d'Azur",
+    subtitle = "2005–2024 · Source : BAAC"
+  ) |>
   cols_label(
-    Num_Acc = "N° Accident",
-    date = "Date",
-    hrmn = "Heure",
-    adr = "Adresse",
+    Num_Acc       = "N° Accident",
+    date          = "Date",
+    hrmn          = "Heure",
+    nom_commune   = "Commune",
+    adr           = "Adresse",
     configuration = "Configuration",
-    sexe_label = "Sexe",
-    age = "Âge"
-  )
-````
+    sexe_label    = "Sexe",
+    age           = "Âge"
+  ) |>
+  tab_style(
+    style     = cell_fill(color = "#fde8e8"),
+    locations = cells_body(rows = configuration == "Vélo seul")
+  ) |>
+  tab_footnote("Lignes surlignées = accidents sans tiers (vélo seul).")
+```
 
+## Cartographie (2019–2024)
 
-## Caractéristiques des accidents mortels
+```{r}
+#| label: carte
 
-### Répartition par configuration
+deces_geo <- deces |>
+  filter(!is.na(lat), !is.na(long), lat != 0, long != 0)
+
+if (nrow(deces_geo) > 0) {
+  leaflet(deces_geo) |>
+    addTiles() |>
+    addCircleMarkers(
+      lng         = ~long,
+      lat         = ~lat,
+      radius      = 8,
+      color       = ~if_else(velo_seul, col_orange, col_navy),
+      stroke      = TRUE,
+      weight      = 2,
+      fillOpacity = 0.8,
+      popup = ~paste0(
+        "<b>Commune :</b> ", com, "<br>",
+        "<b>Année :</b> ", an, "<br>",
+        "<b>Date :</b> ", jour, "/", mois, "<br>",
+        "<b>Heure :</b> ", hrmn, "<br>",
+        "<b>Configuration :</b> ", configuration, "<br>",
+        "<b>Adresse :</b> ", adr, "<br>",
+        "<b>Sexe :</b> ", sexe_label,
+        " | <b>Âge :</b> ",
+        if_else(is.na(age), "?", as.character(round(age))), " ans"
+      )
+    ) |>
+    addLegend(
+      position = "bottomright",
+      colors   = c(col_navy, col_orange),
+      labels   = c("Avec tiers", "Vélo seul"),
+      title    = "Configuration"
+    )
+} else {
+  cat("Pas de coordonnées GPS disponibles (données géolocalisées uniquement à partir de 2019).\n")
+}
+```
+
+---
+
+# 2. Caractéristiques des accidents mortels
+
+## Configuration et évolution
+
 ```{r}
 #| label: config-mortels
 
-usagers_velo %>%
-  filter(grav == 2) %>%
-  left_join(config_accidents %>% select(Num_Acc, configuration), by = "Num_Acc") %>%
-  count(configuration, sort = TRUE) %>%
-  mutate(configuration = fct_reorder(configuration, n)) %>%
+deces |>
+  count(configuration, sort = TRUE) |>
+  mutate(configuration = fct_reorder(configuration, n)) |>
   ggplot(aes(x = configuration, y = n)) +
   geom_col(fill = col_navy, alpha = 0.8) +
   coord_flip() +
   labs(
     title = "Accidents mortels par configuration",
-    x = NULL,
-    y = "Nombre de décès"
-  ) +
-  theme_minimal()
+    x     = NULL,
+    y     = "Nombre de décès"
+  )
 ```
 
-### Évolution temporelle
 ```{r}
 #| label: evolution-mortels
 
-usagers_velo %>%
-  filter(grav == 2) %>%
-  left_join(caract_velo %>% select(Num_Acc, an), by = "Num_Acc") %>%
-  count(an) %>%
+deces |>
+  count(an) |>
   ggplot(aes(x = an, y = n)) +
   geom_col(fill = col_teal, alpha = 0.8) +
+  scale_x_continuous(breaks = seq(2005, 2024, 2)) +
   labs(
     title = "Nombre de décès par année",
-    x = NULL,
-    y = "Nombre de décès"
-  ) +
-  theme_minimal()
+    x     = NULL,
+    y     = "Nombre de décès"
+  )
 ```
 
-### Profil des victimes
+## Profil des victimes
+
 ```{r}
 #| label: profil-victimes
 
-library(patchwork)
-
-# Sexe
-p_sexe <- usagers_velo %>%
-  filter(grav == 2) %>%
-  count(sexe_label) %>%
+p_sexe <- deces |>
+  count(sexe_label) |>
   ggplot(aes(x = sexe_label, y = n)) +
   geom_col(fill = col_navy, alpha = 0.8) +
   labs(title = "Sexe", x = NULL, y = "Nombre") +
-  theme_minimal() +
   theme(plot.title = element_text(size = 11))
 
-# Âge
-p_age <- usagers_velo %>%
-  filter(grav == 2, !is.na(an_nais)) %>%
-  left_join(caract_velo %>% select(Num_Acc, an), by = "Num_Acc") %>%
-  mutate(age = an - an_nais) %>%
-  filter(age >= 0, age <= 100) %>%
+p_age <- deces |>
+  filter(!is.na(age)) |>
   ggplot(aes(x = age)) +
-  geom_histogram(binwidth = 10, fill = col_teal, alpha = 0.8, color = "white") +
+  geom_histogram(binwidth = 10, fill = col_teal, alpha = 0.8, colour = "white") +
   labs(title = "Âge", x = "Âge", y = "Nombre") +
-  theme_minimal() +
   theme(plot.title = element_text(size = 11))
 
 p_sexe + p_age
@@ -154,171 +236,115 @@ p_sexe + p_age
 
 ## Circonstances
 
-### Conditions de luminosité
 ```{r}
 #| label: luminosite-mortels
 
-usagers_velo %>%
-  filter(grav == 2) %>%
-  left_join(caract_velo %>% select(Num_Acc, lum_label), by = "Num_Acc") %>%
-  count(lum_label) %>%
-  mutate(lum_label = fct_reorder(lum_label, n, .desc = TRUE)) %>%
+deces |>
+  count(lum_label) |>
+  mutate(lum_label = fct_reorder(lum_label, n, .desc = TRUE)) |>
   ggplot(aes(x = lum_label, y = n)) +
   geom_col(fill = col_navy, alpha = 0.8) +
   coord_flip() +
   labs(
     title = "Conditions de luminosité lors des accidents mortels",
-    x = NULL,
-    y = "Nombre de décès"
-  ) +
-  theme_minimal()
+    x     = NULL,
+    y     = "Nombre de décès"
+  )
 ```
 
-### Répartition horaire
 ```{r}
 #| label: heure-mortels
 
-usagers_velo %>%
-  filter(grav == 2) %>%
-  left_join(caract_velo %>% select(Num_Acc, hrmn), by = "Num_Acc") %>%
-  filter(!is.na(hrmn), str_detect(hrmn, "^\\d{2}:\\d{2}$")) %>%
-  mutate(heure = as.integer(substr(hrmn, 1, 2))) %>%
-  count(heure) %>%
+deces |>
+  filter(!is.na(hrmn), str_detect(hrmn, "^\\d{2}:\\d{2}$")) |>
+  mutate(heure = as.integer(substr(hrmn, 1, 2))) |>
+  count(heure) |>
   ggplot(aes(x = heure, y = n)) +
   geom_col(fill = col_teal, alpha = 0.8) +
   scale_x_continuous(breaks = seq(0, 23, 2)) +
   labs(
     title = "Accidents mortels par heure de la journée",
-    x = "Heure",
-    y = "Nombre de décès"
-  ) +
-  theme_minimal()
-```
-
-
-## Focus : Accidents mortels "vélo seul"
-
-Sur les 14 accidents mortels de cyclistes à Nice entre 2005 et 2024, **5 sont des accidents "vélo seul"** (sans collision avec un autre véhicule ou un piéton). Ces accidents représentent **36% des décès** et méritent une attention particulière.
-
-### Liste des accidents
-```{r}
-#| label: accidents-velo-seul-mortels
-
-library(DT)
-
-# Identifier les accidents "vélo seul" avec décès
-acc_velo_seul <- config_accidents %>%
-  filter(configuration == "Vélo seul") %>%
-  pull(Num_Acc)
-
-usagers_velo %>%
-  filter(Num_Acc %in% acc_velo_seul, grav == 2) %>%
-  left_join(caract_velo, by = "Num_Acc") %>%
-  left_join(lieux_velo, by = "Num_Acc") %>%
-  mutate(
-    date = paste(jour, mois, an, sep = "/"),
-    age = an - an_nais,
-    adr = iconv(adr, from = "latin1", to = "UTF-8"),
-    adr = ifelse(is.na(adr), "", adr)
-  ) %>%
-  select(
-    Num_Acc, date, hrmn, adr,
-    sexe_label, age,
-    lum_label, atm_label,
-    catr, vosp, surf, infra
-  ) %>%
-  arrange(desc(Num_Acc)) %>%
-  datatable(
-    caption = "Accidents mortels 'vélo seul' à Nice (2005-2024)",
-    colnames = c(
-      "N° Accident", "Date", "Heure", "Adresse",
-      "Sexe", "Âge",
-      "Luminosité", "Météo",
-      "Type route", "Voie réservée", "Surface", "Infrastructure"
-    ),
-    options = list(
-      pageLength = 10,
-      scrollX = TRUE
-    )
+    x     = "Heure",
+    y     = "Nombre de décès"
   )
 ```
 
-### Circonstances détaillées
-```{r}
-#| label: circonstances-velo-seul
+---
 
-# Préparer les données pour analyse
-accidents_velo_seul_details <- usagers_velo %>%
-  filter(Num_Acc %in% acc_velo_seul, grav == 2) %>%
-  left_join(caract_velo, by = "Num_Acc") %>%
-  left_join(lieux_velo, by = "Num_Acc") %>%
-  left_join(vehicules_velo, by = c("Num_Acc", "num_veh")) %>%
-  mutate(age = an - an_nais)
+# 3. Focus : accidents mortels "vélo seul"
+
+Sur les `r n_tues` cyclistes décédés dans la Métropole Nice Côte d'Azur,
+**`r n_velo_seul` sont morts dans un accident sans tiers**
+(`r round(n_velo_seul / n_tues * 100)`% des décès). Cette proportion est
+significativement supérieure à la part des accidents "vélo seul" dans l'ensemble
+des accidents, ce qui mérite une attention particulière.
+
+```{r}
+#| label: donnees-velo-seul
+
+# Sous-table pour les analyses "vélo seul"
+deces_vs <- deces |>
+  filter(velo_seul) |>
+  left_join(
+    vehicules_velo |> select(Num_Acc, num_veh, obs),
+    by = c("Num_Acc", "num_veh")
+  )
 ```
 
-#### Profil des victimes
+## Profil des victimes
+
 ```{r}
 #| label: profil-velo-seul
 
-library(patchwork)
-
-# Sexe
-p1 <- accidents_velo_seul_details %>%
-  count(sexe_label) %>%
+p1 <- deces_vs |>
+  count(sexe_label) |>
   ggplot(aes(x = sexe_label, y = n)) +
   geom_col(fill = col_navy, alpha = 0.8) +
   labs(title = "Sexe", x = NULL, y = "Nombre") +
-  theme_minimal() +
   theme(plot.title = element_text(size = 11))
 
-# Âge
-p2 <- accidents_velo_seul_details %>%
+p2 <- deces_vs |>
+  filter(!is.na(age)) |>
   ggplot(aes(x = age)) +
-  geom_histogram(binwidth = 10, fill = col_teal, alpha = 0.8, color = "white") +
+  geom_histogram(binwidth = 10, fill = col_teal, alpha = 0.8, colour = "white") +
   labs(title = "Âge", x = "Âge", y = "Nombre") +
-  theme_minimal() +
   theme(plot.title = element_text(size = 11))
 
 p1 + p2
 ```
 
-#### Conditions d'éclairage et météo
+## Conditions d'éclairage et météo
+
 ```{r}
 #| label: conditions-velo-seul
 
-library(patchwork)
-
-# Luminosité
-p1 <- accidents_velo_seul_details %>%
-  count(lum_label) %>%
-  mutate(lum_label = fct_reorder(lum_label, n, .desc = TRUE)) %>%
+p1 <- deces_vs |>
+  count(lum_label) |>
+  mutate(lum_label = fct_reorder(lum_label, n, .desc = TRUE)) |>
   ggplot(aes(x = lum_label, y = n)) +
   geom_col(fill = col_navy, alpha = 0.8) +
   coord_flip() +
   labs(title = "Luminosité", x = NULL, y = "Nombre") +
-  theme_minimal() +
   theme(plot.title = element_text(size = 11))
 
-# Météo
-p2 <- accidents_velo_seul_details %>%
-  count(atm_label) %>%
-  mutate(atm_label = fct_reorder(atm_label, n, .desc = TRUE)) %>%
+p2 <- deces_vs |>
+  count(atm_label) |>
+  mutate(atm_label = fct_reorder(atm_label, n, .desc = TRUE)) |>
   ggplot(aes(x = atm_label, y = n)) +
   geom_col(fill = col_teal, alpha = 0.8) +
   coord_flip() +
   labs(title = "Conditions atmosphériques", x = NULL, y = "Nombre") +
-  theme_minimal() +
   theme(plot.title = element_text(size = 11))
 
 p1 + p2
 ```
 
-#### Infrastructure et type de voie
+## Infrastructure et type de voie
+
 ```{r}
 #| label: infrastructure-velo-seul
 
-# Catégorie de route
-accidents_velo_seul_details %>%
+deces_vs |>
   mutate(
     catr_label = case_when(
       catr == 1 ~ "Autoroute",
@@ -329,33 +355,28 @@ accidents_velo_seul_details %>%
       catr == 6 ~ "Parking",
       catr == 7 ~ "Métropole urbaine",
       catr == 9 ~ "Autre",
-      TRUE ~ "Non renseigné"
+      TRUE      ~ "Non renseigné"
     )
-  ) %>%
-  count(catr_label) %>%
-  mutate(catr_label = fct_reorder(catr_label, n, .desc = TRUE)) %>%
+  ) |>
+  count(catr_label) |>
+  mutate(catr_label = fct_reorder(catr_label, n, .desc = TRUE)) |>
   ggplot(aes(x = catr_label, y = n)) +
   geom_col(fill = col_navy, alpha = 0.8) +
   coord_flip() +
-  labs(
-    title = "Type de voie",
-    x = NULL,
-    y = "Nombre"
-  ) +
-  theme_minimal()
+  labs(title = "Type de voie", x = NULL, y = "Nombre")
 ```
+
 ```{r}
 #| label: infrastructure-details
 
-# Voie réservée et surface
-accidents_velo_seul_details %>%
+deces_vs |>
   mutate(
     vosp_label = case_when(
       vosp == 0 | is.na(vosp) ~ "Pas de voie réservée",
-      vosp == 1 ~ "Piste cyclable",
-      vosp == 2 ~ "Bande cyclable",
-      vosp == 3 ~ "Voie réservée",
-      TRUE ~ "Non renseigné"
+      vosp == 1               ~ "Piste cyclable",
+      vosp == 2               ~ "Bande cyclable",
+      vosp == 3               ~ "Voie réservée",
+      TRUE                    ~ "Non renseigné"
     ),
     surf_label = case_when(
       surf == 1 ~ "Normale",
@@ -367,36 +388,37 @@ accidents_velo_seul_details %>%
       surf == 7 ~ "Verglacée",
       surf == 8 ~ "Corps gras",
       surf == 9 ~ "Autre",
-      TRUE ~ "Non renseigné"
+      TRUE      ~ "Non renseigné"
     )
-  ) %>%
-  select(Num_Acc, vosp_label, surf_label) %>%
-  gt() %>%
-  tab_header(title = "Infrastructure et surface") %>%
+  ) |>
+  select(Num_Acc, vosp_label, surf_label) |>
+  gt() |>
+  tab_header(title = "Infrastructure et surface — accidents vélo seul") |>
   cols_label(
-    Num_Acc = "N° Accident",
+    Num_Acc    = "N° Accident",
     vosp_label = "Voie réservée",
     surf_label = "État surface"
   )
 ```
 
-#### Obstacle heurté
+## Obstacle heurté
+
 ```{r}
 #| label: obstacle-velo-seul
 
-accidents_velo_seul_details %>%
+deces_vs |>
   mutate(
     obs_label = case_when(
       obs == 0 | is.na(obs) ~ "Sans objet",
-      obs == 1 ~ "Véhicule en stationnement",
-      obs == 2 ~ "Arbre",
-      obs == 3 ~ "Glissière métallique",
-      obs == 4 ~ "Glissière béton",
-      obs == 5 ~ "Autre glissière",
-      obs == 6 ~ "Bâtiment/mur/pile",
-      obs == 7 ~ "Signalisation",
-      obs == 8 ~ "Poteau",
-      obs == 9 ~ "Mobilier urbain",
+      obs == 1  ~ "Véhicule en stationnement",
+      obs == 2  ~ "Arbre",
+      obs == 3  ~ "Glissière métallique",
+      obs == 4  ~ "Glissière béton",
+      obs == 5  ~ "Autre glissière",
+      obs == 6  ~ "Bâtiment/mur/pile",
+      obs == 7  ~ "Signalisation",
+      obs == 8  ~ "Poteau",
+      obs == 9  ~ "Mobilier urbain",
       obs == 10 ~ "Parapet",
       obs == 11 ~ "Ilot/refuge/borne",
       obs == 12 ~ "Bordure trottoir",
@@ -405,42 +427,266 @@ accidents_velo_seul_details %>%
       obs == 15 ~ "Autre obstacle trottoir",
       obs == 16 ~ "Sortie chaussée sans obstacle",
       obs == 17 ~ "Buse/aqueduc",
-      TRUE ~ "Non renseigné"
+      TRUE      ~ "Non renseigné"
     )
-  ) %>%
-  count(obs_label) %>%
-  mutate(obs_label = fct_reorder(obs_label, n, .desc = TRUE)) %>%
+  ) |>
+  count(obs_label) |>
+  mutate(obs_label = fct_reorder(obs_label, n, .desc = TRUE)) |>
   ggplot(aes(x = obs_label, y = n)) +
   geom_col(fill = col_teal, alpha = 0.8) +
   coord_flip() +
-  labs(
-    title = "Obstacle fixe heurté",
-    x = NULL,
-    y = "Nombre"
-  ) +
-  theme_minimal()
+  labs(title = "Obstacle fixe heurté", x = NULL, y = "Nombre")
 ```
-
-### Recherches presse complémentaires
-
-Les circonstances précises de ces accidents seront complétées par des recherches dans la presse locale (Nice-Matin, France 3 Côte d'Azur) en utilisant les dates et adresses identifiées ci-dessus.
-
-**Fichier de données :** `data/accidents_mortels_presse.csv`
-
-| Num_Acc | source | date_article | url | circonstances | notes |
-|---------|--------|--------------|-----|---------------|-------|
-| À compléter | | | | | |
 
 ::: {.callout-warning}
 ## Hypothèses à investiguer
 
 Les accidents "vélo seul" peuvent résulter de :
 
-- **Problèmes d'infrastructure** : nid de poule, rail de tram, bordure, obstacle
+- **Problèmes d'infrastructure** : nid de poule, rail de tram, bordure, obstacle non signalé
 - **Perte de contrôle** : descente, virage serré, vitesse excessive
 - **Collision avec élément fixe** : poteau, arbre, mobilier urbain
-- **Malaise médical** : arrêt cardiaque, malaise
+- **Malaise médical** : arrêt cardiaque, syncope (notamment pour les victimes âgées)
+- **Tiers non identifié** : le véhicule impliqué a pris la fuite et n'a pas été enregistré
 
-La documentation presse permettra de distinguer ces différentes causes et d'identifier les responsabilités (infrastructure défaillante vs comportement).
+La documentation presse et l'inspection terrain permettront de distinguer ces causes
+et d'identifier les éventuelles responsabilités (infrastructure défaillante vs comportement).
 :::
 
+---
+
+# 4. Fiches individuelles
+
+Ces fiches sont alimentées manuellement au fil des recherches. Les champs BAAC sont
+pré-remplis automatiquement ; les champs identité et sources sont à compléter dans
+`fiches_manuelles` ci-dessous.
+
+**Sources à consulter :**
+
+- **Nice-Matin numérique** (~2010–2024) : abonnement ou accès médiathèque
+- **Nice-Matin papier** (2005–2012) : médiathèque Louis Nucéra, fonds de presse locale
+- **France 3 Côte d'Azur** : archives vidéo/web pour les cas médiatisés
+- **Zotero** : référencer chaque article trouvé avec la clé de collection `nice-velo-deces`
+
+```{r}
+#| label: fiches-manuelles
+#| echo: true
+
+## ── À COMPLÉTER AU FIL DES RECHERCHES ──────────────────────────────────────
+## statut_recherche : "Identifié" | "Partiellement identifié" | "Non trouvé" | "À investiguer"
+fiches_manuelles <- tribble(
+  ~Num_Acc,       ~prenom, ~nom_famille, ~statut_recherche,         ~sources_zotero,              ~notes,
+
+  # Cas 1 — Aspremont, 12/06/2005, H, 26 ans, vélo vs voiture
+  "200500039455", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Archives Nice-Matin papier à consulter (médiathèque Louis Nucéra, juin 2005).",
+
+  # Cas 2 — Nice, Prom des Anglais, 12/08/2005, H, 83 ans, vélo vs voiture
+  "200500050470", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Archives Nice-Matin papier à consulter (août 2005). Victime âgée de 83 ans — malaise médical possible à investiguer.",
+
+  # Cas 3 — Nice, ch. de Terron, 05/03/2006, F, 65 ans, vélo seul
+  "200600011271", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Archives Nice-Matin papier (mars 2006). Vélo seul, femme 65 ans — chute ou malaise à investiguer.",
+
+  # Cas 4 — Le Broc, 03/08/2006, F, 50 ans, vélo seul
+  "200600046326", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Archives Nice-Matin papier (août 2006). Vélo seul en zone rurale (Le Broc) — infrastructure ou descente à investiguer.",
+
+  # Cas 5 — Nice, Corniglion Molinier, 26/07/2007, H, 74 ans, vélo vs poids lourd
+  "200700041904", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Archives Nice-Matin papier (juillet 2007). Poids lourd — angle mort probable.",
+
+  # Cas 6 — Gattières, 07/02/2009, H, 30 ans, vélo vs poids lourd
+  "200900020027", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Archives Nice-Matin papier (février 2009). Route rurale, poids lourd.",
+
+  # Cas 7 — Nice, bd J.B. Verany, 18/01/2010, F, 37 ans, vélo vs poids lourd
+  "201000016267", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Archives Nice-Matin papier (janvier 2010). Femme 37 ans, poids lourd en ville.",
+
+  # Cas 8 — Nice, rue Cappatti, 18/06/2010, H, 47 ans, vélo seul
+  "201000016733", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Archives Nice-Matin papier (juin 2010). Vélo seul, rue Cappatti.",
+
+  # Cas 9 — Nice, RD 6202, 18/04/2011, F, 61 ans, vélo seul
+  "201100015801", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Archives Nice-Matin papier (avril 2011). Vélo seul sur route départementale — infrastructure à investiguer.",
+
+  # Cas 10 — Nice, route de Colomars, 08/06/2012, H, 31 ans, vélo vs poids lourd
+  "201200011446", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Archives Nice-Matin papier (juin 2012). Poids lourd, route de Colomars.",
+
+  # Cas 11 — Nice, pont Napoléon III, 11/07/2013, H, 88 ans, vélo vs voiture
+  "201300011100", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Victime âgée de 88 ans — malaise médical possible. Archives Nice-Matin (juillet 2013).",
+
+  # Cas 12 — Nice, bd Carnot, 02/11/2013, H, 61 ans, vélo seul
+  "201300011321", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Vélo seul, boulevard Carnot, 8h45. Archives Nice-Matin (novembre 2013).",
+
+  # Cas 13 — La Trinité, rond-point de l'Oli, 28/08/2015, H, 62 ans, vélo vs poids lourd
+  "201500007802", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Rond-point — angle mort classique avec poids lourd. Archives Nice-Matin (août 2015).",
+
+  # Cas 14 — La Gaude, route de St Laurent, 06/09/2015, H, 16 ans, vélo vs voiture
+  "201500007839", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Victime de 16 ans, nuit (00h45) — possible sortie nocturne. Archives Nice-Matin (septembre 2015). Cas à prioriser.",
+
+  # Cas 15 — Nice, av. du Mal Lyautey, 03/03/2016, H, 69 ans, vélo seul
+  "201600010985", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Vélo seul 9h00, avenue Lyautey. Archives Nice-Matin (mars 2016).",
+
+  # Cas 16 — Villefranche, bvd de la Corne d'Or, 31/05/2017, H, 67 ans, vélo seul
+  "201700006225", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Vélo seul, bord de mer (bd de la Corne d'Or). Descente ou infrastructure à investiguer. Archives Nice-Matin (mai 2017).",
+
+  # Cas 17 — La Gaude, route de Cagnes, 30/09/2018, H, 62 ans, vélo seul
+  "201800003732", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Vélo seul, route rurale La Gaude. Archives Nice-Matin (septembre 2018).",
+
+  # Cas 18 — Nice, Prom des Anglais, 04/12/2018, F, 67 ans, vélo vs 2RM
+  "201800005861", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Collision vélo/2RM sur la Prom, midi. Archives Nice-Matin (décembre 2018).",
+
+  # Cas 19 — Cap-d'Ail, av. du 3 septembre, 06/03/2018, H, 62 ans, autre configuration
+  "201800013738", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Configuration atypique ('autre') à préciser. Archives Nice-Matin (mars 2018).",
+
+  # Cas 20 — Cagnes-sur-Mer, avenue de la Gare, 19/04/2019, H, 83 ans, vélo vs poids lourd
+  "201900010384", NA, NA, "Partiellement identifié", "francebleu-2019-04-19",
+    "Cycliste percuté par un poids lourd route de Cannes à hauteur du domaine du Loup, Cagnes-sur-Mer. Pompiers n'ont pas réussi à le réanimer. Victime âgée de 83 ans. Source : France Bleu Azur (date à confirmer — article daté mars 2022 mais correspond à cet accident ou à un autre sur le même site).",
+
+  # Cas 21 — Vence, route de Saint-Jeannet, 19/04/2019, H, 86 ans, vélo seul
+  "201900019321", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Vélo seul, route rurale Vence. Victime âgée de 86 ans — malaise médical très probable. Rechercher Nice-Matin avril 2019.",
+
+  # Cas 22 — Nice, bd Risso, 04/07/2020, H, 32 ans, vélo vs 2RM
+  "202000032237", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Collision vélo/2RM, nuit (01h30), bd Risso. Profil jeune (32 ans), nuit estivale. Rechercher Nice-Matin juillet 2020.",
+
+  # Cas 23 — Carros, route de Gattières, 04/06/2021, H, 27 ans, vélo vs voiture
+  "202100036505", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne (encodage latin1 dans l'adresse : 'Gattières'). Route rurale Carros–Gattières. Rechercher Nice-Matin juin 2021.",
+
+  # Cas 24 — Nice, Prom des Anglais, 24/05/2021, H, 23 ans, autre configuration
+  "202100038386", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Configuration atypique sur la Prom. Victime jeune (23 ans). Rechercher Nice-Matin mai 2021.",
+
+  # Cas 25 — Cagnes-sur-Mer, avenue de Cannes RN7, 18/03/2022, H, 22 ans, vélo vs poids lourd
+  "202200009470", NA, NA, "Partiellement identifié", "francebleu-2022-03-18",
+    "Cycliste de 22 ans percuté par un poids lourd route de Cannes à hauteur du Domaine du Loup, Cagnes-sur-Mer. Réanimation impossible sur place. Selon un article de suivi, il circulait sur une piste cyclable et aurait fait un léger écart avant de chuter sur la chaussée. Source : France Bleu Azur 18/03/2022.",
+
+  # Cas 26 — Vence, chemin Anciens Combattants, 25/08/2022, F, 16 ans, vélo vs voiture
+  "202200034765", NA, NA, "Non trouvé", NA,
+    "Aucune trace en ligne. Victime de 16 ans, femme — cas à prioriser. Route rurale Vence. Rechercher Nice-Matin août 2022.",
+
+  # Cas 27 — Nice, Prom des Anglais, 01/11/2023, H, 79 ans, vélo vs voiture
+  "202300045287", NA, NA, "Partiellement identifié", "francebleu-2023-11-01, ici-2023-11-01",
+    "Collision voiture/vélo le 01/11/2023 vers 14h15 sur la Prom des Anglais en face du Casino Ferber. Homme ~70-79 ans en arrêt cardio-respiratoire à l'arrivée des secours, transporté à Pasteur 2. Articles initiaux : 'grièvement blessé' — décès probablement survenu après hospitalisation.",
+)
+
+## ────────────────────────────────────────────────────────────────────────────
+```
+
+```{r}
+#| label: generation-fiches
+#| results: asis
+#| echo: false
+
+for (i in seq_len(nrow(deces))) {
+  row <- deces[i, ]
+
+  ext <- fiches_manuelles |> filter(Num_Acc == row$Num_Acc)
+
+  prenom  <- if (nrow(ext) > 0 && !is.na(ext$prenom))         ext$prenom         else "—"
+  nom     <- if (nrow(ext) > 0 && !is.na(ext$nom_famille))    ext$nom_famille    else "—"
+  statut  <- if (nrow(ext) > 0) ext$statut_recherche           else "À investiguer"
+  sources <- if (nrow(ext) > 0 && !is.na(ext$sources_zotero)) ext$sources_zotero else "Aucune source trouvée"
+  notes   <- if (nrow(ext) > 0 && !is.na(ext$notes))          ext$notes          else "—"
+
+  age_txt   <- if (!is.na(row$age)) paste0(round(row$age), " ans") else "Non renseigné"
+  date_txt  <- paste0(row$jour, "/", row$mois, "/", row$an)
+  heure_txt <- if (!is.na(row$hrmn) && row$hrmn != "") row$hrmn else "Non renseignée"
+  lieu_txt  <- if (!is.na(row$adr)  && row$adr  != "") row$adr  else "Non renseignée"
+
+  # Nom de la commune via code INSEE
+  com_txt <- if (!is.na(row$com)) {
+    nom <- communes |> filter(code_insee == row$com) |> pull(nom_commune)
+    if (length(nom) > 0) nom else row$com
+  } else "Non renseignée"
+
+  gps_txt <- if (!is.na(row$lat) && row$lat != 0)
+               paste0(round(row$lat, 5), ", ", round(row$long, 5))
+             else "Non disponible (avant 2019)"
+
+  tag_vs <- if (isTRUE(row$velo_seul)) " ⚠️ **sans tiers**" else ""
+
+  callout_type <- switch(statut,
+    "Identifié"               = "tip",
+    "Partiellement identifié" = "note",
+    "Non trouvé"              = "warning",
+    "note"
+  )
+
+  cat(sprintf("\n## Cas %02d — %s %s {#cas-%02d}\n\n", i, prenom, nom, i))
+  cat(sprintf("::: {.callout-%s}\n## Statut : %s\n:::\n\n", callout_type, statut))
+  cat(sprintf(
+    "| Champ | Valeur |\n|---|---|\n| **ID accident** | `%s` |\n| **Date** | %s |\n| **Heure** | %s |\n| **Commune** | %s |\n| **Adresse** | %s |\n| **GPS** | %s |\n| **Sexe** | %s |\n| **Âge estimé** | %s |\n| **Configuration** | %s%s |\n| **Luminosité** | %s |\n| **Météo** | %s |\n| **Type collision** | %s |\n\n",
+    row$Num_Acc, date_txt, heure_txt, com_txt, lieu_txt, gps_txt,
+    row$sexe_label, age_txt,
+    row$configuration, tag_vs,
+    if_else(is.na(row$lum_label), "—", row$lum_label),
+    if_else(is.na(row$atm_label), "—", row$atm_label),
+    if_else(is.na(row$col_label),  "—", row$col_label)
+  ))
+  cat(sprintf("**Sources Zotero :** %s\n\n", sources))
+  cat(sprintf("**Notes d'investigation :** %s\n\n", notes))
+  cat("---\n\n")
+}
+```
+
+---
+
+# 5. Synthèse
+
+```{r}
+#| label: synthese
+#| echo: false
+
+n_acc_total    <- nrow(config_accidents)
+n_acc_vs       <- sum(config_accidents$configuration == "Vélo seul", na.rm = TRUE)
+pct_vs_general <- round(n_acc_vs / n_acc_total * 100)
+pct_vs_deces   <- round(n_velo_seul / n_tues * 100)
+```
+
+::: {.callout-note icon=false}
+## Ce que disent les données
+
+- **`r n_tues` cyclistes décédés** sur `r n_communes` communes de la Métropole
+  Nice Côte d'Azur entre 2005 et 2024.
+- **`r n_velo_seul` accidents sans tiers** représentent `r pct_vs_deces`% des décès,
+  contre `r pct_vs_general`% dans l'ensemble des accidents — une surreprésentation
+  significative qui pointe vers des causes liées à l'infrastructure.
+- Les accidents géolocalisés (2019–2024) permettent d'identifier les points noirs
+  sur la carte.
+:::
+
+::: {.callout-warning icon=false}
+## Limites
+
+- La BAAC ne distingue pas cause infrastructure / cause humaine dans les accidents
+  "vélo seul".
+- Les identités ne sont pas dans la BAAC ; leur reconstitution dépend des archives
+  de presse.
+- Pas de coordonnées GPS avant 2019.
+:::
+
+::: {.callout-tip icon=false}
+## Prochaines étapes
+
+- Compléter `fiches_manuelles` (section 4) au fil des recherches archives / Zotero.
+- Pour les cas géolocalisés "vélo seul" : inspection terrain de l'infrastructure.
+- Croiser avec les données totem pour estimer un taux d'accident mortel par km
+  parcouru sur la Prom.
+:::
