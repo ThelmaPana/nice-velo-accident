@@ -1,0 +1,567 @@
+---
+title: "Comptage vélo au totem Carras"
+subtitle: "Analyse de série temporelle, Nice à Vélo"
+author: "Thelma Panaïotis"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    embed-resources: true
+    theme: cosmo
+    lightbox: true
+lang: fr
+execute:
+  cache: true
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+#| echo: false
+#| cache: false
+
+library(tidyverse)
+library(here)
+library(lubridate)
+library(pastecs)
+library(stlplus)
+
+# Palette Pyranhia
+col_navy  <- "#0A3D62"
+col_teal  <- "#00A896"
+col_orange <- "#F17D52"
+col_muted <- "#5A8AAD"
+
+theme_set(theme_minimal(base_size = 12))
+```
+
+## Introduction
+
+Ce document analyse les données de comptage du **totem Carras**, situé sur la piste cyclable de Nice. Les données couvrent la période juillet 2020 – février 2026 et sont enrichies de variables météorologiques et calendaires.
+
+L'objectif est double :
+
+- comprendre les **tendances et patterns temporels** du trafic cycliste (évolution annuelle, saisonnalité, effets semaine/week-end) ;
+- identifier les **facteurs explicatifs** de la fréquentation, notamment météorologiques.
+
+Ce document se concentre sur l'exploration et la décomposition de la série temporelle. La modélisation prédictive (XGBoost) fait l'objet d'un document séparé.
+
+## Données
+
+```{r}
+#| label: chargement
+
+df_raw <- read_csv(
+  here("data-raw", "counter", "nice_carras_bike_counts_with_weather.csv"),
+  show_col_types = FALSE
+)
+```
+
+### Aperçu
+
+```{r}
+#| label: apercu
+
+glimpse(df_raw)
+```
+
+### Valeurs manquantes
+
+```{r}
+#| label: missing
+
+df_raw |>
+  summarise(across(everything(), ~ sum(is.na(.)))) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "n_manquants") |>
+  filter(n_manquants > 0) |>
+  mutate(pct = round(n_manquants / nrow(df_raw) * 100, 1)) |>
+  arrange(desc(n_manquants))
+```
+
+Plusieurs variables météorologiques présentent des valeurs manquantes, notamment `snow`, `wdir` et `tsun`. Ces lacunes sont attendues (enneigement rare à Nice, données d'ensoleillement parfois indisponibles) et seront traitées lors de la modélisation.
+
+Le comptage (`count`) ne présente aucune valeur manquante sur la période retenue.
+
+### Nettoyage et périmètre
+
+L'année 2020 est exclue de l'analyse : elle ne couvre que 6 mois (juillet–décembre) et correspond à une période post-confinement aux comportements atypiques. La série analysée débute donc au **1er janvier 2021**.
+
+```{r}
+#| label: nettoyage
+
+df <- df_raw |>
+  mutate(
+    date = as.Date(date),
+    year = year(date),
+    month = month(date),
+    weekday = factor(
+      wday(date, week_start = 1),
+      levels = 1:7,
+      labels = c("Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim")
+    ),
+    is_weekend = wday(date, week_start = 1) >= 6
+  ) |>
+  filter(year >= 2021) |>
+  drop_na(count) |> 
+  select(
+    date, year, month, weekday, is_weekend, is_holiday, is_vacations,
+    count, tavg, tmin, tmax, prcp, wdir, wspd, wpgt, pres, tsun, is_rainy
+  )
+```
+
+```{r}
+#| label: resume
+
+tibble(
+  ` ` = c("Première date", "Dernière date", "Nombre de jours", "Comptage min", "Comptage médian", "Comptage max"),
+  Valeur = c(
+    format(min(df$date)),
+    format(max(df$date)),
+    as.character(nrow(df)),
+    as.character(min(df$count, na.rm = TRUE)),
+    as.character(median(df$count, na.rm = TRUE)),
+    as.character(max(df$count, na.rm = TRUE))
+  )
+) |>
+  knitr::kable()
+```
+
+## Détection des outliers
+
+Avant toute analyse, on identifie les jours présentant un comptage anormalement élevé ou bas. La détection est effectuée directement sur la **série brute** via le **MAD** (*Median Absolute Deviation*) sur une **fenêtre mobile de 60 jours**, ce qui permet de tenir compte de la saisonnalité : la référence est locale, non globale.
+
+Un jour est considéré outlier si son écart à la médiane locale dépasse 3.5 fois le MAD local, ce qui correspond approximativement à ±5σ sous hypothèse de normalité — soit environ 2% des observations attendues.
+
+```{r}
+#| label: outliers-detection
+#| echo: true
+
+library(slider)
+
+detect_outliers_mobile <- function(x, fenetre = 60, seuil = 3.5) {
+  med_mobile <- slide_dbl(x, median, .before = fenetre %/% 2, .after = fenetre %/% 2, .complete = FALSE)
+  mad_mobile <- slide_dbl(x, mad,    .before = fenetre %/% 2, .after = fenetre %/% 2, .complete = FALSE)
+  abs(x - med_mobile) > seuil * mad_mobile
+}
+
+df <- df |>
+  mutate(is_outlier = detect_outliers_mobile(count, fenetre = 60, seuil = 3.5))
+
+df_outliers <- df |>
+  filter(is_outlier) |>
+  arrange(date)
+
+cat(nrow(df_outliers), "outliers détectés sur", nrow(df), "jours (", round(nrow(df_outliers) / nrow(df) * 100, 1), "%)")
+```
+
+```{r}
+#| label: outliers-serie
+#| fig-cap: "Série brute avec outliers détectés (orange)."
+#| echo: false
+
+df |>
+  ggplot(aes(x = date, y = count)) +
+  geom_point(aes(color = is_outlier), alpha = 0.5, size = 0.8) +
+  scale_color_manual(values = c("FALSE" = col_navy, "TRUE" = col_orange), guide = "none") +
+  labs(x = NULL, y = "Cyclistes / jour")
+```
+
+### Analyse des outliers
+
+```{r}
+#| label: outliers-enrichissement
+#| echo: false
+
+events_nice <- read_csv(
+  here("data-raw", "counter", "events_v2.csv"),
+  show_col_types = FALSE
+) |>
+  filter(Nice == TRUE) |>
+  mutate(date = as.Date(date)) |>
+  select(date, event)
+
+df_out_enrichi <- df |>
+  filter(is_outlier) |>
+  left_join(events_nice, by = "date") |>
+  mutate(
+    contexte = case_when(
+      !is.na(event)  ~ "Événement sportif",
+      is_holiday     ~ "Jour férié",
+      is_vacations   ~ "Vacances scolaires",
+      is_rainy       ~ "Pluie",
+      TRUE           ~ "Inexpliqué"
+    ),
+    contexte = factor(contexte, levels = c(
+      "Événement sportif", "Jour férié", "Vacances scolaires", "Pluie", "Inexpliqué"
+    )),
+    jour_julien = yday(date),
+    label       = format(date, "%d %b %Y")
+  )
+```
+
+```{r}
+#| label: outliers-plots
+#| fig-cap: "Analyse des outliers par contexte. Ligne pointillée : médiane globale."
+#| fig-height: 8
+#| echo: false
+
+library(patchwork)
+
+th <- theme_minimal(base_size = 11) +
+  theme(legend.position = "right", axis.title = element_blank())
+
+p1 <- df_out_enrichi |>
+  filter(contexte == "Événement sportif") |>
+  ggplot(aes(x = jour_julien, y = count, color = tavg)) +
+  geom_hline(yintercept = median(df$count), linetype = "dashed", color = "grey60") +
+  geom_point(size = 3) +
+  ggrepel::geom_text_repel(aes(label = paste0(label, "\n", event)), size = 2.8, color = "black") +
+  scale_color_viridis_c(option = "plasma", name = "Temp. (°C)") +
+  scale_x_continuous(limits = c(1, 365)) +
+  labs(title = "Événement sportif") + th
+
+p2 <- df_out_enrichi |>
+  filter(contexte == "Jour férié") |>
+  ggplot(aes(x = jour_julien, y = count, color = tavg)) +
+  geom_hline(yintercept = median(df$count), linetype = "dashed", color = "grey60") +
+  geom_point(size = 3) +
+  ggrepel::geom_text_repel(aes(label = label), size = 2.8, color = "black") +
+  scale_color_viridis_c(option = "plasma", name = "Temp. (°C)") +
+  scale_x_continuous(limits = c(1, 365)) +
+  labs(title = "Jour férié") + th
+
+p3 <- df_out_enrichi |>
+  ggplot(aes(x = jour_julien, y = count, color = tavg)) +
+  geom_hline(yintercept = median(df$count), linetype = "dashed", color = "grey60") +
+  geom_point(size = 2, alpha = 0.8) +
+  scale_color_viridis_c(option = "plasma", name = "Temp. (°C)") +
+  scale_x_continuous(limits = c(1, 365)) +
+  labs(title = "Température") + th
+
+p4 <- df_out_enrichi |>
+  ggplot(aes(x = jour_julien, y = count, color = prcp)) +
+  geom_hline(yintercept = median(df$count), linetype = "dashed", color = "grey60") +
+  geom_point(size = 2, alpha = 0.8) +
+  scale_color_viridis_c(option = "mako", name = "Préc. (mm)") +
+  scale_x_continuous(limits = c(1, 365)) +
+  labs(title = "Précipitations") + th
+
+p5 <- df_out_enrichi |>
+  ggplot(aes(x = jour_julien, y = count, color = wspd)) +
+  geom_hline(yintercept = median(df$count), linetype = "dashed", color = "grey60") +
+  geom_point(size = 2, alpha = 0.8) +
+  scale_color_viridis_c(option = "cividis", name = "Vent (km/h)") +
+  scale_x_continuous(limits = c(1, 365)) +
+  labs(title = "Vent") + th
+
+p6 <- df_out_enrichi |>
+  filter(contexte == "Inexpliqué") |>
+  ggplot(aes(x = jour_julien, y = count, color = tavg, shape = is_rainy, size = wspd)) +
+  geom_hline(yintercept = median(df$count), linetype = "dashed", color = "grey60") +
+  geom_point() +
+  ggrepel::geom_text_repel(aes(label = label), size = 2.8, color = "black") +
+  scale_color_viridis_c(option = "plasma", name = "Temp. (°C)") +
+  scale_shape_manual(values = c("FALSE" = 16, "TRUE" = 17), name = "Pluie") +
+  scale_x_continuous(limits = c(1, 365)) +
+  labs(title = "Inexpliqué") + th
+
+(p1 + p2) / (p3 + p4) / (p5 + p6) +
+  plot_layout(axes = "collect") +
+  plot_annotation(
+    caption = "Axe x : jour julien. Axe y : comptage journalier. Ligne pointillée : médiane globale."
+  )
+```
+
+### Retrait des outliers
+
+Les outliers sont retirés avant les analyses suivantes afin de ne pas biaiser la décomposition et les tests statistiques.
+
+```{r}
+#| label: outliers-retrait
+#| echo: true
+
+df_clean <- df |>
+  filter(!is_outlier)
+
+cat("Série nettoyée :", nrow(df_clean), "jours (", nrow(df) - nrow(df_clean), "jours retirés)")
+```
+
+
+## Vue d'ensemble
+
+### Série nettoyée
+
+```{r}
+#| label: serie-nettoyee
+#| fig-cap: "Comptage journalier de cyclistes au totem Carras, 2021–2026, avec droite de tendance. Les outliers ont été retirés."
+#| echo: false
+
+lm_count  <- lm(count ~ as.numeric(date), data = df_clean)
+slope_daily  <- coef(lm_count)[2]
+slope_yearly <- round(slope_daily * 365)
+
+ggplot(df_clean, aes(x = date, y = count)) +
+  geom_point(color = col_navy, alpha = 0.4, size = 0.8) +
+  geom_smooth(method = "lm", color = col_orange, se = FALSE, linewidth = 1) +
+  labs(x = NULL, y = "Cyclistes / jour")
+```
+
+La droite de régression indique une progression moyenne de **`r slope_yearly` cyclistes / jour par an** sur la période.
+
+### Structure temporelle
+
+Avant toute décomposition, on examine l'autocorrélogramme de la série nettoyée pour identifier les structures périodiques présentes.
+
+```{r}
+#| label: acf-court
+#| fig-cap: "Autocorrélogramme de la série nettoyée (lag max = 60 jours)."
+#| echo: false
+
+acf(df_clean$count, lag.max = 60, main = "")
+```
+
+La décroissance lente depuis lag 1 trahit une forte autocorrélation à court terme, signature d'une tendance de long terme. On distingue également des pics réguliers tous les 7 lags, révélant un **cycle hebdomadaire** net.
+
+```{r}
+#| label: acf-long
+#| fig-cap: "Autocorrélogramme de la série nettoyée (lag max = 400 jours)."
+#| echo: false
+
+acf(df_clean$count, lag.max = 400, main = "")
+```
+
+À plus longue échelle, l'ACF dessine une forme caractéristique : corrélations positives en début de série, négatives vers lag 180, puis de nouveau positives vers lag 365 — signature d'une **saisonnalité annuelle** marquée. Les deux périodicités (7 et 365 jours) sont clairement imbriquées, ce qui oriente vers une décomposition STL multisaisonnière.
+
+### Tendance lissée
+
+```{r}
+#| label: tendance
+#| fig-cap: "Comptage journalier et tendance lissée (moyenne mobile centrée, fenêtre 30 jours)."
+#| echo: false
+
+df_clean <- df_clean |>
+  arrange(date) |>
+  mutate(trend_30 = slider::slide_dbl(count, mean, .before = 15, .after = 14, .complete = TRUE))
+
+ggplot(df_clean, aes(x = date)) +
+  geom_point(aes(y = count), color = col_navy, alpha = 0.3, size = 0.8) +
+  geom_line(aes(y = trend_30), color = col_orange, linewidth = 1) +
+  labs(x = NULL, y = "Cyclistes / jour")
+```
+## Patterns temporels
+
+Au-delà de la tendance, la fréquentation cycliste suit des rythmes réguliers à plusieurs échelles. On examine successivement les patterns **hebdomadaires**, **mensuels** et **annuels**.
+
+### Par jour de semaine
+
+```{r}
+#| label: pattern-semaine
+#| fig-cap: "Distribution du comptage par jour de semaine."
+#| echo: false
+
+df_clean |>
+  ggplot(aes(x = weekday, y = count, fill = is_weekend)) +
+  geom_violin(alpha = 0.8) +
+  stat_summary(fun = "median", geom = "point", size = 1) +
+  scale_fill_manual(values = c("FALSE" = col_navy, "TRUE" = col_teal), guide = "none") +
+  labs(x = NULL, y = "Cyclistes / jour")
+```
+
+
+
+### Par mois
+
+```{r}
+#| label: pattern-mois
+#| fig-cap: "Comptage médian par mois, toutes années confondues."
+#| echo: false
+
+mois_labels <- c("Jan", "Fév", "Mar", "Avr", "Mai", "Jun",
+                 "Jul", "Aoû", "Sep", "Oct", "Nov", "Déc")
+
+df_clean |>
+  mutate(month = factor(month, levels = 1:12, labels = mois_labels)) |>
+  ggplot(aes(x = month, y = count)) +
+  geom_violin(fill = col_navy, alpha = 0.8) +
+  stat_summary(fun = "median", geom = "point", size = 1) +
+  labs(x = NULL, y = "Cyclistes / jour")
+```
+
+La saisonnalité est prononcée : la fréquentation culmine en **été** (juin–août) et atteint son minimum en **hiver** (décembre–février). Le profil est asymétrique — la montée printanière est plus rapide que la descente automnale.
+
+### Par année
+
+```{r}
+#| label: pattern-annee
+#| fig-cap: "Comptage médian annuel (2021–2025). 2026 exclu car année incomplète."
+#| echo: false
+
+df_clean |>
+  filter(year <= 2025) |>
+  group_by(year) |>
+  summarise(
+    mediane = median(count, na.rm = TRUE),
+    q25 = quantile(count, 0.25, na.rm = TRUE),
+    q75 = quantile(count, 0.75, na.rm = TRUE)
+  ) |>
+  ggplot(aes(x = year, y = mediane)) +
+  geom_col(fill = col_navy, alpha = 0.85, width = 0.6) +
+  geom_errorbar(aes(ymin = q25, ymax = q75), width = 0.2, color = col_teal) +
+  labs(
+    x = NULL,
+    y = "Cyclistes / jour",
+    caption = "Barres : médiane. Intervalles : Q1–Q3."
+  ) +
+  scale_x_continuous(breaks = 2021:2025)
+```
+
+La fréquentation médiane progresse de façon **régulière** sur la période, avec une accélération notable à partir de 2022. Les barres d'erreur (Q1–Q3) indiquent une variabilité intra-annuelle stable.
+
+### Jour de semaine × mois
+
+```{r}
+#| label: heatmap-semaine-mois
+#| fig-cap: "Comptage médian par jour de semaine et mois."
+#| echo: false
+
+df_clean |>
+  mutate(month = factor(month, levels = 1:12, labels = mois_labels)) |>
+  group_by(weekday, month) |>
+  summarise(mediane = median(count, na.rm = TRUE), .groups = "drop") |>
+  ggplot(aes(x = month, y = weekday, fill = mediane)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  scale_fill_viridis_c() +
+  scale_y_discrete(limits = rev) +
+  labs(x = NULL, y = NULL, fill = "Cyclistes\n(médiane)")
+```
+
+```{r}
+#| label: heatmap-semaine-mois-normalise
+#| fig-cap: "Écart au comptage médian mensuel, par jour de semaine."
+#| echo: false
+
+df_clean |>
+  mutate(month = factor(month, levels = 1:12, labels = mois_labels)) |>
+  group_by(weekday, month) |>
+  summarise(mediane = median(count), .groups = "drop") |>
+  group_by(month) |>
+  mutate(mediane_norm = mediane / median(mediane)) |>
+  ungroup() |>
+  ggplot(aes(x = month, y = weekday, fill = mediane_norm)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  scale_fill_viridis_c() +
+  scale_y_discrete(limits = rev) +
+  labs(x = NULL, y = NULL, fill = "Ratio au\nmédian mensuel")
+```
+
+```{r}
+#| label: heatmap-semaine-mois-annee
+#| fig-cap: "Comptage médian par jour de semaine et mois, par année."
+#| echo: false
+
+df_clean |>
+  filter(year <= 2025) |>
+  mutate(month = factor(month, levels = 1:12, labels = mois_labels)) |>
+  group_by(year, weekday, month) |>
+  summarise(mediane = median(count, na.rm = TRUE), .groups = "drop") |>
+  ggplot(aes(x = month, y = weekday, fill = mediane)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  scale_fill_viridis_c() +
+  scale_y_discrete(limits = rev) +
+  facet_wrap(~year, ncol = 1) +
+  labs(x = NULL, y = NULL, fill = "Cyclistes\n(médiane)")
+```
+
+```{r}
+#| label: heatmap-semaine-annee
+#| fig-cap: "Comptage médian par jour de semaine et année."
+#| echo: false
+
+df_clean |>
+  filter(year <= 2025) |>
+  group_by(year, weekday) |>
+  summarise(mediane = median(count, na.rm = TRUE), .groups = "drop") |>
+  ggplot(aes(x = factor(year), y = weekday, fill = mediane)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  scale_fill_viridis_c() +
+  scale_y_discrete(limits = rev) +
+  labs(x = NULL, y = NULL, fill = "Cyclistes\n(médiane)")
+```
+
+::: {.callout-note}
+## À approfondir
+
+La normalisation par mois fait ressortir un pic de fréquentation en **milieu de semaine** (mardi, jeudi, puis mercredi), sans opposition nette semaine / week-end. Ce pattern mériterait une analyse plus fine, par exemple en distinguant les périodes de vacances scolaires et hors-vacances, ou en croisant avec les données météo.
+:::
+
+## Décomposition STL multisaisonnière
+
+L'ACF a mis en évidence deux périodicités imbriquées — hebdomadaire (7 jours) et annuelle (365 jours) — qu'une STL classique ne peut capturer simultanément. On recourt à `mstl()` du package `forecast`, qui étend la décomposition STL à plusieurs saisonnalités.
+
+Le paramètre `s.window` contrôle la flexibilité de chaque composante saisonnière. On retient `s.window = "periodic"` : la saisonnalité est supposée identique d'une année à l'autre. Ce choix résulte d'une comparaison des résidus avec une version plus souple (`s.window = c(13, 11)`) : la version périodique produit des résidus plus propres à court terme, et la saisonnalité annuelle ne montre pas de variation notable sur les 5 années disponibles.
+
+```{r}
+#| label: mstl-decomposition
+#| fig-cap: "Décomposition STL multisaisonnière (périodicités 7 et 365 jours, s.window = 'periodic')."
+#| echo: true
+
+library(forecast)
+
+ts_multi  <- msts(df_clean$count, seasonal.periods = c(7, 365))
+dec_multi <- mstl(ts_multi, s.window = "periodic")
+autoplot(dec_multi)
+```
+
+### Résidus
+
+```{r}
+#| label: mstl-residus-acf-court
+#| fig-cap: "Autocorrélogramme des résidus (lag max = 60 jours)."
+#| echo: false
+
+residus <- as.numeric(dec_multi[, "Remainder"])
+acf(residus, lag.max = 60, main = "")
+```
+
+```{r}
+#| label: mstl-residus-acf-long
+#| fig-cap: "Autocorrélogramme des résidus (lag max = 400 jours)."
+#| echo: false
+
+acf(residus, lag.max = 400, main = "")
+```
+
+Les résidus ne présentent plus de structure saisonnière dominante. Il subsiste une autocorrélation à très court terme (lags 1–2) ainsi qu'un léger signal aux multiples de lag 7, indiquant que le cycle hebdomadaire n'est pas parfaitement capturé — limite attendue d'une STL dont la composante hebdomadaire suppose un pattern stable, alors que celui-ci varie selon la saison.
+
+
+## Test de tendance
+
+La tendance visuelle observée sur la série brute et confirmée par la décomposition STL est-elle statistiquement significative ? On le vérifie avec le test de Cox-Stuart (`trend.test()` du package `pastecs`), test non paramétrique adapté aux séries temporelles sans hypothèse de normalité. Le test est appliqué sur la **composante de tendance extraite par `mstl()`** plutôt que sur la série brute, afin de s'affranchir de l'effet de la saisonnalité.
+
+```{r}
+#| label: trend-test
+#| echo: true
+
+library(pastecs)
+
+trend_component <- as.numeric(dec_multi[, "Trend"])
+trend_component <- trend_component[!is.na(trend_component)]
+
+tt <- trend.test(trend_component, R = 1)
+tt
+```
+
+```{r}
+#| label: trend-test-resultat
+#| echo: false
+
+p_val <- round(tt$p.value, 4)
+direction <- ifelse(tt$statistic > 0, "croissante", "décroissante")
+```
+
+Le test conclut à une tendance **`r direction`** statistiquement significative (p = `r p_val`).
+
